@@ -2,6 +2,13 @@
 
 本项目遵循“每次版本更新都记录变更”的约定。
 
+## 0.3.8 - 2026-03-26
+
+- 优化低延迟探测链路：主动探测会话时支持 `open_chat(clearUnreads=false)` 轻量刷新，降低消息可见性滞后
+- 新增配置 `active_probe_fetch_limit`（默认 `5`）与 `active_probe_open_chat`（默认 `true`），减少探测分支每轮拉取负担并可按需开关
+- 优化媒体获取阻塞：新增 `media_retry_attempts`（默认 `4`）和 `media_retry_interval_ms`（默认 `250`），缩短媒体未就绪时的阻塞窗口
+- 优化 HTTP 调用性能：`WeChatClient` 改为线程局部 `requests.Session` 复用连接，减少频繁建连开销
+
 ## 0.3.7 - 2026-03-26
 
 - 优化 WebSocket 鉴权失败提示：当 `/api/ws/events` 返回 `HTTP 401/Unauthorized` 时，日志改为更友好的中文指引

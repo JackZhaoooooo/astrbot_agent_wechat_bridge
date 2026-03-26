@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import threading
 from collections.abc import Awaitable, Callable
 from typing import Any
 from urllib.parse import quote, urlencode, urlparse, urlunparse
@@ -30,6 +31,7 @@ class WeChatClient:
         self.headers = {"Content-Type": "application/json"}
         if token:
             self.headers["Authorization"] = f"Bearer {token}"
+        self._thread_local = threading.local()
 
     @staticmethod
     def _normalize_url(base_url: str) -> str:
@@ -68,9 +70,8 @@ class WeChatClient:
         )
 
     def _get(self, path: str) -> Any:
-        response = requests.get(
+        response = self._session().get(
             f"{self.base_url}{path}",
-            headers=self.headers,
             timeout=self.timeout,
         )
         if not response.ok:
@@ -78,15 +79,29 @@ class WeChatClient:
         return response.json()
 
     def _post(self, path: str, body: dict[str, Any] | None = None) -> Any:
-        response = requests.post(
+        response = self._session().post(
             f"{self.base_url}{path}",
             json=body,
-            headers=self.headers,
             timeout=self.timeout,
         )
         if not response.ok:
             raise AgentWeChatAPIError(f"{response.status_code}: {response.text}")
         return response.json()
+
+    def _session(self) -> requests.Session:
+        session = getattr(self._thread_local, "session", None)
+        if session is None:
+            session = requests.Session()
+            session.headers.update(self.headers)
+            adapter = requests.adapters.HTTPAdapter(
+                pool_connections=8,
+                pool_maxsize=8,
+                max_retries=0,
+            )
+            session.mount("http://", adapter)
+            session.mount("https://", adapter)
+            self._thread_local.session = session
+        return session
 
     def status(self) -> dict[str, Any]:
         return self._get("/api/status")

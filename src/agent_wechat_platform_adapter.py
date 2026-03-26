@@ -106,6 +106,26 @@ CONFIG_METADATA = {
             "help_text": "Probe latest chats directly via list_messages each sync to reduce receive latency caused by stale unread metadata.",
             "field_type": "int",
         },
+        "active_probe_fetch_limit": {
+            "label": "Active Probe Fetch Limit",
+            "help_text": "Message fetch limit for each actively probed chat.",
+            "field_type": "int",
+        },
+        "active_probe_open_chat": {
+            "label": "Active Probe Open Chat",
+            "help_text": "Whether active probing should call open_chat to refresh chat state before pulling messages.",
+            "field_type": "bool",
+        },
+        "media_retry_attempts": {
+            "label": "Media Retry Attempts",
+            "help_text": "Retry attempts when media data is not ready yet.",
+            "field_type": "int",
+        },
+        "media_retry_interval_ms": {
+            "label": "Media Retry Interval",
+            "help_text": "Retry interval in milliseconds for media fetch.",
+            "field_type": "int",
+        },
     }
 }
 
@@ -120,6 +140,10 @@ DEFAULT_CONFIG = {
     "group_allow_from": [],
     "require_mention": True,
     "active_probe_limit": 5,
+    "active_probe_fetch_limit": 5,
+    "active_probe_open_chat": True,
+    "media_retry_attempts": 4,
+    "media_retry_interval_ms": 250,
 }
 
 
@@ -426,6 +450,11 @@ class AgentWeChatPlatformAdapter(Platform):
             limit = 5
         if limit <= 0:
             return
+        try:
+            fetch_limit = max(1, int(self.config.get("active_probe_fetch_limit", 5) or 5))
+        except (TypeError, ValueError):
+            fetch_limit = 5
+        open_chat_before_probe = bool(self.config.get("active_probe_open_chat", True))
 
         probed = 0
         for chat in chats:
@@ -437,7 +466,12 @@ class AgentWeChatPlatformAdapter(Platform):
             if is_official_account(chat_id):
                 continue
 
-            await self._process_chat(chat, skip_open=True)
+            await self._process_chat(
+                chat,
+                skip_open=not open_chat_before_probe,
+                clear_unreads=False,
+                fetch_limit_override=fetch_limit,
+            )
             probed += 1
 
     async def _refresh_auth_if_needed(self) -> bool:
@@ -461,18 +495,28 @@ class AgentWeChatPlatformAdapter(Platform):
             return False
         return True
 
-    async def _process_chat(self, chat: dict[str, Any], skip_open: bool = False) -> None:
+    async def _process_chat(
+        self,
+        chat: dict[str, Any],
+        skip_open: bool = False,
+        *,
+        clear_unreads: bool = True,
+        fetch_limit_override: int | None = None,
+    ) -> None:
         chat_id = str(chat.get("username") or chat.get("id") or "")
         if not chat_id:
             return
 
         if not skip_open:
             try:
-                await asyncio.to_thread(self.client.open_chat, chat_id, True)
+                await asyncio.to_thread(self.client.open_chat, chat_id, clear_unreads)
             except Exception as exc:
                 logger.warning(f"[agent_wechat] failed to open chat {chat_id}: {exc}")
 
-        fetch_limit = max(int(chat.get("unreadCount", 0) or 0), 20)
+        if fetch_limit_override is None:
+            fetch_limit = max(int(chat.get("unreadCount", 0) or 0), 20)
+        else:
+            fetch_limit = max(1, int(fetch_limit_override))
         messages = await asyncio.to_thread(self.client.list_messages, chat_id, fetch_limit, 0)
         if not messages:
             return
@@ -628,8 +672,20 @@ class AgentWeChatPlatformAdapter(Platform):
         chat_id: str,
         local_id: int,
     ) -> tuple[str, str, str] | None:
+        try:
+            max_attempts = max(1, int(self.config.get("media_retry_attempts", 4) or 4))
+        except (TypeError, ValueError):
+            max_attempts = 4
+        try:
+            retry_interval = max(
+                0.0,
+                float(self.config.get("media_retry_interval_ms", 250) or 250) / 1000.0,
+            )
+        except (TypeError, ValueError):
+            retry_interval = 0.25
+
         result: dict[str, Any] | None = None
-        for attempt in range(15):
+        for attempt in range(max_attempts):
             try:
                 candidate = await asyncio.to_thread(self.client.get_media, chat_id, local_id)
             except AgentWeChatAPIError as exc:
@@ -644,9 +700,9 @@ class AgentWeChatPlatformAdapter(Platform):
             if candidate.get("data"):
                 result = candidate
                 break
-            if attempt < 14:
+            if attempt < max_attempts - 1 and retry_interval > 0:
                 # 上游媒体落库可能有延迟，短暂等待后重试。
-                await asyncio.sleep(1.0)
+                await asyncio.sleep(retry_interval)
 
         if result is None:
             return None

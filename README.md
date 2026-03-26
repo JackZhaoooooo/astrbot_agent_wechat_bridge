@@ -90,6 +90,11 @@ AstrBot 加载插件后，在平台管理中添加 `agent_wechat`，配置项如
 | `group_policy` | `open` | 群聊策略：`open` / `allowlist` / `disabled` |
 | `group_allow_from` | `[]` | 群聊发送者白名单，`group_policy=allowlist` 时生效 |
 | `require_mention` | `true` | 群聊中是否必须 `@机器人` 才转发给 AstrBot |
+| `active_probe_limit` | `5` | 每轮主动探测的会话数量上限 |
+| `active_probe_fetch_limit` | `5` | 主动探测单会话拉取消息条数 |
+| `active_probe_open_chat` | `true` | 主动探测前是否执行 `open_chat(clearUnreads=false)` 轻量刷新 |
+| `media_retry_attempts` | `4` | 媒体消息拉取重试次数 |
+| `media_retry_interval_ms` | `250` | 媒体消息重试间隔（毫秒） |
 
 也可以直接在 `cmd_config.json` 的 `platform` 数组里确保存在如下项：
 
@@ -106,7 +111,12 @@ AstrBot 加载插件后，在平台管理中添加 `agent_wechat`，配置项如
   "allow_from": [],
   "group_policy": "open",
   "group_allow_from": [],
-  "require_mention": true
+  "require_mention": true,
+  "active_probe_limit": 5,
+  "active_probe_fetch_limit": 5,
+  "active_probe_open_chat": true,
+  "media_retry_attempts": 4,
+  "media_retry_interval_ms": 250
 }
 ```
 
@@ -119,6 +129,9 @@ AstrBot 加载插件后，在平台管理中添加 `agent_wechat`，配置项如
   - 检查 AstrBot 全局白名单。若开启 `enable_id_white_list=true`，需把会话 ID（如 `agent_wechat:FriendMessage:wxid_xxx`）加入 `id_whitelist`
 - 群里发消息没触发：
   - 默认 `require_mention=true`，需要 `@机器人` 才会转发到 AstrBot
+- 消息进入 AstrBot 有明显延迟（如十几秒）：
+  - 确认 `active_probe_open_chat=true`、`active_probe_limit>=3`、`active_probe_fetch_limit` 适中（建议 `3~8`）
+  - 若消息里媒体较多，可适当降低 `media_retry_attempts` 或 `media_retry_interval_ms`，减少单轮阻塞时间
 - 发送后想看是否收到了：
   - 查看 AstrBot 日志中的 `[agent_wechat] inbound accepted ...` 或 `[agent_wechat] skipped inbound ... reason=...`
 
