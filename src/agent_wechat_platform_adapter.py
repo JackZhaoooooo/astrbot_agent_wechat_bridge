@@ -183,6 +183,7 @@ class AgentWeChatPlatformAdapter(Platform):
         self.last_seen_id: dict[str, int] = {}
         self.last_auth_check = 0.0
         self.last_auth_status: str | None = None
+        self.sync_round = 0
         self.self_id = "agent_wechat"
         self.ws_task: asyncio.Task[None] | None = None
         self.ws_connected = False
@@ -211,7 +212,16 @@ class AgentWeChatPlatformAdapter(Platform):
         await super().send_by_session(session, message_chain)
 
     async def run(self) -> None:
-        logger.info("[agent_wechat] adapter started (WS client + REST backfill)")
+        logger.info(
+            "[agent_wechat] adapter starting: "
+            f"server={self.config['server_url']} "
+            f"token={'set' if self.config.get('token') else 'unset'} "
+            f"poll_interval_ms={self.config['poll_interval_ms']} "
+            f"auth_poll_interval_ms={self.config['auth_poll_interval_ms']} "
+            f"dm_policy={self.config['dm_policy']} "
+            f"group_policy={self.config['group_policy']} "
+            f"require_mention={self.config['require_mention']}"
+        )
         self.ws_task = asyncio.create_task(self._run_events_ws())
         self.sync_event.set()
         try:
@@ -316,6 +326,12 @@ class AgentWeChatPlatformAdapter(Platform):
                 converted = await self._convert_message(chat, message)
                 if converted is not None:
                     await self.handle_msg(converted)
+                    self._log_inbound_message(
+                        source="ws",
+                        chat=chat,
+                        message=message,
+                        session_id=converted.session_id,
+                    )
                     if chat_id and local_id:
                         self.last_seen_id[chat_id] = max(self.last_seen_id.get(chat_id, 0), local_id)
                 return
@@ -345,7 +361,24 @@ class AgentWeChatPlatformAdapter(Platform):
         if not await self._refresh_auth_if_needed():
             return
 
+        self.sync_round += 1
         chats = await asyncio.to_thread(self.client.list_chats, 50, 0)
+        seed_count = 0
+        for chat in chats:
+            chat_id = str(chat.get("username") or chat.get("id") or "")
+            if not chat_id or chat_id in self.last_seen_id:
+                continue
+            if is_official_account(chat_id):
+                continue
+
+            unread = int(chat.get("unreadCount", 0) or 0)
+            if unread > 0:
+                continue
+            last_msg_local_id = int(chat.get("lastMsgLocalId", 0) or 0)
+            if last_msg_local_id > 0:
+                self.last_seen_id[chat_id] = last_msg_local_id
+                seed_count += 1
+
         unread_chats = [
             chat
             for chat in chats
@@ -361,6 +394,7 @@ class AgentWeChatPlatformAdapter(Platform):
             str(chat.get("username") or chat.get("id") or "")
             for chat in unread_chats
         }
+        catchup_chats: list[dict[str, Any]] = []
         for chat in chats:
             if self.shutdown_event.is_set():
                 break
@@ -369,7 +403,27 @@ class AgentWeChatPlatformAdapter(Platform):
                 continue
             last_msg_local_id = int(chat.get("lastMsgLocalId", 0) or 0)
             if last_msg_local_id > self.last_seen_id[chat_id]:
-                await self._process_chat(chat, skip_open=True)
+                catchup_chats.append(chat)
+
+        if (
+            self.sync_round == 1
+            or seed_count > 0
+            or len(unread_chats) > 0
+            or len(catchup_chats) > 0
+        ):
+            logger.info(
+                "[agent_wechat] sync "
+                f"round={self.sync_round} "
+                f"chats={len(chats)} "
+                f"unread={len(unread_chats)} "
+                f"catchup={len(catchup_chats)} "
+                f"seeded={seed_count}"
+            )
+
+        for chat in catchup_chats:
+            if self.shutdown_event.is_set():
+                break
+            await self._process_chat(chat, skip_open=True)
 
     async def _refresh_auth_if_needed(self) -> bool:
         now_ms = time.time() * 1000
@@ -384,7 +438,14 @@ class AgentWeChatPlatformAdapter(Platform):
             self.last_auth_status = None
             return False
 
-        self.last_auth_status = str(auth.get("status") or "unknown")
+        current_status = str(auth.get("status") or "unknown")
+        if current_status != self.last_auth_status:
+            logger.info(
+                "[agent_wechat] auth status changed: "
+                f"{self.last_auth_status or 'unknown'} -> {current_status}, "
+                f"loggedInUser={auth.get('loggedInUser') or ''}"
+            )
+        self.last_auth_status = current_status
         if auth.get("loggedInUser"):
             self.self_id = str(auth["loggedInUser"])
 
@@ -410,6 +471,18 @@ class AgentWeChatPlatformAdapter(Platform):
             return
 
         new_messages = self._select_new_messages(chat_id, chat, messages)
+        if (
+            int(chat.get("unreadCount", 0) or 0) > 0
+            or len(new_messages) > 0
+        ):
+            logger.info(
+                "[agent_wechat] chat sync "
+                f"chat_id={chat_id} "
+                f"unread={int(chat.get('unreadCount', 0) or 0)} "
+                f"fetched={len(messages)} "
+                f"new={len(new_messages)} "
+                f"skip_open={skip_open}"
+            )
         if not new_messages:
             return
 
@@ -420,6 +493,12 @@ class AgentWeChatPlatformAdapter(Platform):
             if converted is None:
                 continue
             await self.handle_msg(converted)
+            self._log_inbound_message(
+                source="rest",
+                chat=chat,
+                message=message,
+                session_id=converted.session_id,
+            )
 
         self.last_seen_id[chat_id] = max(int(item.get("localId", 0) or 0) for item in new_messages)
 
@@ -468,7 +547,13 @@ class AgentWeChatPlatformAdapter(Platform):
             group_allowlist=normalize_allowlist(self.config.get("group_allow_from")),
         )
         if not allowed:
-            logger.debug(f"[agent_wechat] skipped message {message.get('localId')} from {sender_id}: {reason}")
+            logger.info(
+                "[agent_wechat] skipped inbound "
+                f"chat={chat_id} "
+                f"localId={message.get('localId')} "
+                f"sender={sender_id} "
+                f"reason={reason}"
+            )
             return None
 
         components: list[Any] = []
@@ -525,6 +610,29 @@ class AgentWeChatPlatformAdapter(Platform):
             abm.session_id = sender_id
 
         return abm
+
+    def _log_inbound_message(
+        self,
+        *,
+        source: str,
+        chat: dict[str, Any],
+        message: dict[str, Any],
+        session_id: str,
+    ) -> None:
+        chat_id = str(chat.get("username") or chat.get("id") or "")
+        sender_id = str(message.get("sender") or chat_id or "")
+        local_id = int(message.get("localId", 0) or 0)
+        raw_type = int(message.get("type", 0) or 0)
+        base_type = raw_type & 0x7FFFFFFF
+        logger.info(
+            "[agent_wechat] inbound accepted "
+            f"source={source} "
+            f"chat={chat_id} "
+            f"sender={sender_id} "
+            f"localId={local_id} "
+            f"type={base_type} "
+            f"session={session_id}"
+        )
 
     async def _download_media(
         self,

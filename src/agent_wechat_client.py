@@ -53,7 +53,13 @@ class WeChatClient:
 
     @staticmethod
     def _qs(params: dict[str, Any]) -> str:
-        items = [(key, value) for key, value in params.items() if value is not None]
+        items = []
+        for key, value in params.items():
+            if value is None:
+                continue
+            if isinstance(value, bool):
+                value = "true" if value else "false"
+            items.append((key, value))
         if not items:
             return ""
         return "?" + "&".join(

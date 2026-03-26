@@ -101,12 +101,43 @@ AstrBot 加载插件后，在平台管理中添加 `agent_wechat`，配置项如
 | `group_allow_from` | `[]` | 群聊发送者白名单，`group_policy=allowlist` 时生效 |
 | `require_mention` | `true` | 群聊中是否必须 `@机器人` 才转发给 AstrBot |
 
+也可以直接在 `cmd_config.json` 的 `platform` 数组里确保存在如下项：
+
+```json
+{
+  "id": "agent_wechat",
+  "type": "agent_wechat",
+  "enable": true,
+  "server_url": "http://localhost:6174",
+  "token": "你的_agent_wechat_token",
+  "poll_interval_ms": 1000,
+  "auth_poll_interval_ms": 30000,
+  "dm_policy": "open",
+  "allow_from": [],
+  "group_policy": "open",
+  "group_allow_from": [],
+  "require_mention": true
+}
+```
+
 ## 使用说明
 
 1. 确保 `agent-wechat` 已正常启动
 2. 确保微信账号已登录
 3. 在 AstrBot 中启用本插件和 `agent_wechat` 平台
 4. 完成配置后，插件会自动建立 WS 连接，并在需要时做 REST 补偿同步
+
+## 常见排查
+
+- 插件已安装但“完全没日志、没反应”：
+  - 检查 AstrBot 的 `cmd_config.json` 是否真的有 `type=agent_wechat` 且 `enable=true`
+  - 检查 `token` 是否正确。若 `curl http://localhost:6174/api/status/auth` 返回 `Unauthorized`，说明必须携带 token
+- 日志里显示已收到消息但没有进入对话：
+  - 检查 AstrBot 全局白名单。若开启 `enable_id_white_list=true`，需把会话 ID（如 `agent_wechat:FriendMessage:wxid_xxx`）加入 `id_whitelist`
+- 群里发消息没触发：
+  - 默认 `require_mention=true`，需要 `@机器人` 才会转发到 AstrBot
+- 发送后想看是否收到了：
+  - 查看 AstrBot 日志中的 `[agent_wechat] inbound accepted ...` 或 `[agent_wechat] skipped inbound ... reason=...`
 
 ## 实现细节
 
