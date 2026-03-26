@@ -23,7 +23,7 @@ except ImportError:
     "astrbot_agent_wechat_bridge",
     "Codex",
     "AstrBot platform adapter for agent-wechat.",
-    "0.3.4",
+    "0.3.5",
 )
 class AgentWeChatBridgePlugin(Star):
     """Loads the platform adapter so AstrBot can register it."""
