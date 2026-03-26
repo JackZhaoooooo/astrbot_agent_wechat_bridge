@@ -148,7 +148,6 @@ def _mime_to_component(path: str, mime_type: str, filename: str):
     "WeChat adapter powered by agent-wechat.",
     default_config_tmpl=DEFAULT_CONFIG,
     support_streaming_message=False,
-    support_proactive_message=True,
     config_metadata=CONFIG_METADATA,
     adapter_display_name="Agent WeChat",
 )

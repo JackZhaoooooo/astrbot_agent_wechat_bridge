@@ -9,7 +9,7 @@ from .agent_wechat_platform_adapter import AgentWeChatPlatformAdapter  # noqa: F
     "astrbot_agent_wechat_bridge",
     "Codex",
     "AstrBot platform adapter for agent-wechat.",
-    "0.3.1",
+    "0.3.2",
 )
 class AgentWeChatBridgePlugin(Star):
     """Loads the platform adapter so AstrBot can register it."""

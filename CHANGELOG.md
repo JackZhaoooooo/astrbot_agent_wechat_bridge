@@ -2,6 +2,11 @@
 
 本项目遵循“每次版本更新都记录变更”的约定。
 
+## 0.3.2 - 2026-03-26
+
+- 修复 `register_platform_adapter()` 参数不兼容导致插件导入失败的问题
+- 移除不被 AstrBot v4.22.1 支持的 `support_proactive_message` 参数
+
 ## 0.3.1 - 2026-03-26
 
 - 修复插件无法在 AstrBot 插件列表中显示的问题
