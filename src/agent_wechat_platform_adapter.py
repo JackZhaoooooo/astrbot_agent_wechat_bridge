@@ -76,6 +76,11 @@ CONFIG_METADATA = {
             "help_text": "Timeout in milliseconds for latency-sensitive list_messages/open_chat calls.",
             "field_type": "int",
         },
+        "outbound_guard_ms": {
+            "label": "Outbound Guard",
+            "help_text": "Protective window in milliseconds to suppress open_chat during outbound sending.",
+            "field_type": "int",
+        },
         "dm_policy": {
             "label": "DM Policy",
             "help_text": "open, allowlist, or disabled.",
@@ -161,6 +166,7 @@ DEFAULT_CONFIG = {
     "full_sync_interval_ms": 900,
     "auth_poll_interval_ms": 30000,
     "hot_path_timeout_ms": 1200,
+    "outbound_guard_ms": 1800,
     "dm_policy": "open",
     "allow_from": [],
     "group_policy": "open",
@@ -249,6 +255,9 @@ class AgentWeChatPlatformAdapter(Platform):
         self.last_full_sync_ms = 0.0
         self.active_chat_ids: list[str] = []
         self.chat_locks: dict[str, asyncio.Lock] = {}
+        self.outbound_lock = asyncio.Lock()
+        self.outbound_guard_until_ms = 0.0
+        self.chat_outbound_guard_until_ms: dict[str, float] = {}
 
     def meta(self) -> PlatformMetadata:
         return self.metadata
@@ -271,6 +280,52 @@ class AgentWeChatPlatformAdapter(Platform):
         if timeout_ms <= 0:
             return None
         return max(0.2, timeout_ms / 1000.0)
+
+    def _outbound_guard_ms(self) -> int:
+        try:
+            return max(0, int(self.config.get("outbound_guard_ms", 1800) or 0))
+        except (TypeError, ValueError):
+            return 1800
+
+    def _mark_outbound_guard(self, chat_id: str) -> None:
+        guard_ms = self._outbound_guard_ms()
+        if guard_ms <= 0:
+            return
+        until = time.time() * 1000 + guard_ms
+        self.outbound_guard_until_ms = max(self.outbound_guard_until_ms, until)
+        if chat_id:
+            self.chat_outbound_guard_until_ms[chat_id] = max(
+                self.chat_outbound_guard_until_ms.get(chat_id, 0.0),
+                until,
+            )
+
+    def _is_outbound_guard_active(self, chat_id: str | None = None) -> bool:
+        now = time.time() * 1000
+        if self.outbound_guard_until_ms > now:
+            return True
+        if chat_id:
+            until = self.chat_outbound_guard_until_ms.get(chat_id, 0.0)
+            if until > now:
+                return True
+            if until > 0:
+                self.chat_outbound_guard_until_ms.pop(chat_id, None)
+        return False
+
+    async def _send_message_chain(self, chat_id: str, message_chain) -> None:
+        if not chat_id:
+            return
+        async with self.outbound_lock:
+            # 发送前后都设置保护窗口，避免探测分支在关键时刻抢占会话焦点。
+            self._mark_outbound_guard(chat_id)
+            try:
+                await AgentWeChatMessageEvent.send_message_chain(
+                    self.client,
+                    chat_id,
+                    message_chain,
+                )
+            finally:
+                self._mark_outbound_guard(chat_id)
+                self._touch_chat(chat_id)
 
     async def _call_client(
         self,
@@ -308,6 +363,8 @@ class AgentWeChatPlatformAdapter(Platform):
             self._touch_chat(chat_id)
 
     async def _fast_probe_hot_chats(self) -> None:
+        if self.outbound_lock.locked():
+            return
         try:
             limit = max(0, int(self.config.get("fast_probe_limit", 2) or 2))
         except (TypeError, ValueError):
@@ -351,12 +408,7 @@ class AgentWeChatPlatformAdapter(Platform):
         session: MessageSesion,
         message_chain,
     ) -> None:
-        await AgentWeChatMessageEvent.send_message_chain(
-            self.client,
-            session.session_id,
-            message_chain,
-        )
-        self._touch_chat(str(session.session_id))
+        await self._send_message_chain(str(session.session_id), message_chain)
         await super().send_by_session(session, message_chain)
 
     async def run(self) -> None:
@@ -605,6 +657,8 @@ class AgentWeChatPlatformAdapter(Platform):
         processed_chat_ids: set[str],
     ) -> None:
         """主动探测最近会话，绕过未读元数据更新滞后。"""
+        if self.outbound_lock.locked():
+            return
         try:
             limit = max(0, int(self.config.get("active_probe_limit", 5) or 0))
         except (TypeError, ValueError):
@@ -696,6 +750,8 @@ class AgentWeChatPlatformAdapter(Platform):
                 return result if isinstance(result, list) else []
 
             async def open_chat(clear_flag: bool) -> bool:
+                if self._is_outbound_guard_active(chat_id):
+                    return False
                 try:
                     await self._call_client(
                         self.client.open_chat,
@@ -966,5 +1022,6 @@ class AgentWeChatPlatformAdapter(Platform):
             client=self.client,
             chat_id=str(chat_id),
             is_group=bool(is_group),
+            send_message_callable=self._send_message_chain,
         )
         self.commit_event(event)
