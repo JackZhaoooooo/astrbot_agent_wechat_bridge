@@ -51,39 +51,29 @@ flowchart LR
 2. 对应微信账号已通过 `agent-wechat` 登录
 3. AstrBot 版本 `>= 4.16`
 
-本地快速启动：
+## 快速使用
+
+
+### 先安装agent-wechat
 
 ```bash
 npm install -g @agent-wechat/cli
 wx up
 ```
-
-Docker Compose 示例：
-
-```yaml
-services:
-  agent-wechat:
-    image: ghcr.io/thisnick/agent-wechat:latest
-    container_name: agent-wechat
-    security_opt:
-      - seccomp=unconfined
-    cap_add:
-      - SYS_PTRACE
-    ports:
-      - "6174:6174"
-    volumes:
-      - agent-wechat-data:/data
-      - agent-wechat-home:/home/wechat
-    restart: unless-stopped
-
-volumes:
-  agent-wechat-data:
-  agent-wechat-home:
+- wx up运行后得到类似
+```bash
+[root@VM-0-10-opencloudos ~]# wx up
+Container agent-wechat is already running.
+API: http://localhost:6174
+noVNC: http://localhost:6174/vnc/?token=cda8bb0945b636df2c5802edad83e2417f3cc9500e65cb4f3xxxxxxxxx&autoconnect=true
 ```
+- cda8bb0945b636df2c5802edad83e2417f3cc9500e65cb4f3xxxxxxxxx,即为平台配置的token，后续配置要用到
 
-## 安装方式
+### 在astrbot安装本项目的插件，安装后启用并重启
 
-将本仓库放入 AstrBot 的插件目录，然后重启 AstrBot。
+### 在侧边菜单中点击“机器人”，点右侧的“创建机器人”，在选择平台最下面会有个“agant_wechat”平台
+
+### 填入上面获取到的token，启用即可
 
 ## 平台配置
 
@@ -119,13 +109,6 @@ AstrBot 加载插件后，在平台管理中添加 `agent_wechat`，配置项如
   "require_mention": true
 }
 ```
-
-## 使用说明
-
-1. 确保 `agent-wechat` 已正常启动
-2. 确保微信账号已登录
-3. 在 AstrBot 中启用本插件和 `agent_wechat` 平台
-4. 完成配置后，插件会自动建立 WS 连接，并在需要时做 REST 补偿同步
 
 ## 常见排查
 

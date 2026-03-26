@@ -1,4 +1,4 @@
-"""AstrBot event object used by the agent-wechat adapter."""
+"""平台适配器使用的消息事件对象。"""
 
 from __future__ import annotations
 
@@ -43,7 +43,7 @@ def _load_binary_from_path(path: str, timeout: int = 30) -> tuple[bytes, str, st
 
 
 class AgentWeChatMessageEvent(AstrMessageEvent):
-    """AstrBot event wrapper for a single inbound WeChat message."""
+    """单条微信入站消息对应的事件封装。"""
 
     def __init__(
         self,
@@ -81,6 +81,7 @@ class AgentWeChatMessageEvent(AstrMessageEvent):
         chat_id: str,
         message_chain: MessageChain,
     ) -> list[dict[str, Any]]:
+        # 将消息链拆分为桥接服务可发送的一个或多个请求体。
         payloads: list[dict[str, Any]] = []
         text_buffer: list[str] = []
 
@@ -156,7 +157,7 @@ class AgentWeChatMessageEvent(AstrMessageEvent):
         for payload in payloads:
             result = await asyncio.to_thread(client.send_message, payload)
             if not result.get("success", True):
-                raise RuntimeError(result.get("error") or "agent-wechat send failed")
+                raise RuntimeError(result.get("error") or "agent-wechat 发送失败")
 
     async def send(self, message: MessageChain) -> None:
         await self.send_message_chain(self.client, self.chat_id, message)
@@ -168,6 +169,7 @@ class AgentWeChatMessageEvent(AstrMessageEvent):
         use_fallback: bool = False,
     ) -> None:
         if use_fallback:
+            # 兼容不支持原生流式的场景，按分片逐段发送。
             async for chain in generator:
                 await self.send(chain)
                 await asyncio.sleep(1.2)
@@ -180,6 +182,7 @@ class AgentWeChatMessageEvent(AstrMessageEvent):
                     parts.append(component.text)
 
         if parts:
+            # 非回退模式下，将流式纯文本聚合为一次发送。
             await self.send(MessageChain([Plain(text="".join(parts))]))
 
     async def get_group(self, group_id: str | None = None, **kwargs: Any) -> Group | None:

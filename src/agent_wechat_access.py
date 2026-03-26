@@ -1,4 +1,4 @@
-"""Access control and small text normalization helpers."""
+"""访问控制与文本归一化辅助函数。"""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ def normalize_allowlist(values: list[str] | None) -> list[str]:
 
 
 def strip_leading_mentions(text: str) -> str:
-    """Remove leading WeChat @mentions before the actual message body."""
+    """移除消息开头的微信 @提及，仅保留真正正文。"""
 
     cleaned = INVISIBLE_TEXT_RE.sub("", text or "").strip()
     if not cleaned:
@@ -67,7 +67,7 @@ def should_forward_message(
     group_policy: str,
     group_allowlist: list[str],
 ) -> tuple[bool, str]:
-    """Return whether the message should be forwarded into AstrBot."""
+    """返回消息是否应转发到机器人框架。"""
 
     dm_policy = dm_policy if dm_policy in DM_POLICIES else "disabled"
     group_policy = group_policy if group_policy in GROUP_POLICIES else "disabled"

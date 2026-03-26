@@ -1,4 +1,4 @@
-"""Agent WeChat Bridge for AstrBot."""
+"""个人微信桥接插件。"""
 
 __all__ = [
     "main",

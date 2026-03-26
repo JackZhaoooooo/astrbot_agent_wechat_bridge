@@ -1,7 +1,7 @@
-"""AstrBot plugin root entrypoint.
+"""插件根入口。
 
-AstrBot expects `main.py` at the plugin root. This file bridges the root
-plugin entrypoint to the existing adapter implementation under `src/`.
+框架要求插件根目录存在 `main.py`。该文件用于将根入口桥接到
+`src/` 下的实际适配器实现。
 """
 
 from pathlib import Path
@@ -14,19 +14,19 @@ if str(PLUGIN_ROOT) not in sys.path:
     sys.path.insert(0, str(PLUGIN_ROOT))
 
 try:
-    from .src.agent_wechat_platform_adapter import AgentWeChatPlatformAdapter  # noqa: F401
+    from .src.agent_wechat_platform_adapter import AgentWeChatPlatformAdapter
 except ImportError:
-    from src.agent_wechat_platform_adapter import AgentWeChatPlatformAdapter  # noqa: F401
+    from src.agent_wechat_platform_adapter import AgentWeChatPlatformAdapter
 
 
 @register(
     "astrbot_agent_wechat_bridge",
     "Codex",
     "AstrBot platform adapter for agent-wechat.",
-    "0.3.5",
+    "0.3.7",
 )
 class AgentWeChatBridgePlugin(Star):
-    """Loads the platform adapter so AstrBot can register it."""
+    """加载平台适配器并完成注册。"""
 
     def __init__(self, context: Context) -> None:
         super().__init__(context)

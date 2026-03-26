@@ -1,4 +1,4 @@
-"""AstrBot platform adapter backed by agent-wechat WS + REST APIs."""
+"""基于事件流与接口轮询的个人微信平台适配器。"""
 
 from __future__ import annotations
 
@@ -101,6 +101,11 @@ CONFIG_METADATA = {
             "help_text": "Only forward group messages that mention the bot.",
             "field_type": "bool",
         },
+        "active_probe_limit": {
+            "label": "Active Probe Limit",
+            "help_text": "Probe latest chats directly via list_messages each sync to reduce receive latency caused by stale unread metadata.",
+            "field_type": "int",
+        },
     }
 }
 
@@ -114,6 +119,7 @@ DEFAULT_CONFIG = {
     "group_policy": "open",
     "group_allow_from": [],
     "require_mention": True,
+    "active_probe_limit": 5,
 }
 
 
@@ -152,7 +158,7 @@ def _mime_to_component(path: str, mime_type: str, filename: str):
     adapter_display_name="Agent WeChat",
 )
 class AgentWeChatPlatformAdapter(Platform):
-    """Uses the agent-wechat event WebSocket as the primary trigger and REST as backfill."""
+    """以事件流为主触发，接口补偿兜底。"""
 
     def __init__(
         self,
@@ -216,6 +222,7 @@ class AgentWeChatPlatformAdapter(Platform):
         try:
             while not self.shutdown_event.is_set():
                 try:
+                    # 有事件时立即同步；无事件时按轮询超时兜底。
                     await asyncio.wait_for(
                         self.sync_event.wait(),
                         timeout=max(0.1, int(self.config["poll_interval_ms"]) / 1000),
@@ -259,6 +266,13 @@ class AgentWeChatPlatformAdapter(Platform):
 
     async def _on_ws_error(self, exc: Exception) -> None:
         if not self.shutdown_event.is_set():
+            err_text = str(exc)
+            if "HTTP 401" in err_text or "Unauthorized" in err_text:
+                logger.warning(
+                    "[agent_wechat] events websocket error: "
+                    "未授权，终端运行wx up获取token，并填入平台配置"
+                )
+                return
             logger.warning(f"[agent_wechat] events websocket error: {exc}")
 
     async def _on_ws_message(self, raw_message: str) -> None:
@@ -346,6 +360,7 @@ class AgentWeChatPlatformAdapter(Platform):
             return
 
         chats = await asyncio.to_thread(self.client.list_chats, 50, 0)
+        processed_chat_ids: set[str] = set()
         for chat in chats:
             chat_id = str(chat.get("username") or chat.get("id") or "")
             if not chat_id or chat_id in self.last_seen_id:
@@ -370,6 +385,9 @@ class AgentWeChatPlatformAdapter(Platform):
             if self.shutdown_event.is_set():
                 break
             await self._process_chat(chat, skip_open=False)
+            chat_id = str(chat.get("username") or chat.get("id") or "")
+            if chat_id:
+                processed_chat_ids.add(chat_id)
 
         unread_ids = {
             str(chat.get("username") or chat.get("id") or "")
@@ -390,6 +408,37 @@ class AgentWeChatPlatformAdapter(Platform):
             if self.shutdown_event.is_set():
                 break
             await self._process_chat(chat, skip_open=True)
+            chat_id = str(chat.get("username") or chat.get("id") or "")
+            if chat_id:
+                processed_chat_ids.add(chat_id)
+
+        await self._probe_active_chats(chats, processed_chat_ids)
+
+    async def _probe_active_chats(
+        self,
+        chats: list[dict[str, Any]],
+        processed_chat_ids: set[str],
+    ) -> None:
+        """主动探测最近会话，绕过未读元数据更新滞后。"""
+        try:
+            limit = max(0, int(self.config.get("active_probe_limit", 5) or 0))
+        except (TypeError, ValueError):
+            limit = 5
+        if limit <= 0:
+            return
+
+        probed = 0
+        for chat in chats:
+            if self.shutdown_event.is_set() or probed >= limit:
+                break
+            chat_id = str(chat.get("username") or chat.get("id") or "")
+            if not chat_id or chat_id in processed_chat_ids:
+                continue
+            if is_official_account(chat_id):
+                continue
+
+            await self._process_chat(chat, skip_open=True)
+            probed += 1
 
     async def _refresh_auth_if_needed(self) -> bool:
         now_ms = time.time() * 1000
@@ -456,6 +505,7 @@ class AgentWeChatPlatformAdapter(Platform):
     ) -> list[dict[str, Any]]:
         ordered = sorted(messages, key=lambda item: int(item.get("localId", 0) or 0))
         if chat_id not in self.last_seen_id:
+            # 首次看到该会话：仅消费未读尾部，避免把历史消息整段回灌到机器人框架。
             unread = int(chat.get("unreadCount", 0) or 0)
             if unread <= 0:
                 self.last_seen_id[chat_id] = int(ordered[-1].get("localId", 0) or 0)
@@ -595,6 +645,7 @@ class AgentWeChatPlatformAdapter(Platform):
                 result = candidate
                 break
             if attempt < 14:
+                # 上游媒体落库可能有延迟，短暂等待后重试。
                 await asyncio.sleep(1.0)
 
         if result is None:

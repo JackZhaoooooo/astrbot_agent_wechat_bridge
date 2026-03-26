@@ -1,4 +1,4 @@
-"""agent-wechat REST + WebSocket client helpers."""
+"""个人微信桥接服务客户端辅助实现。"""
 
 from __future__ import annotations
 
@@ -10,18 +10,18 @@ from urllib.parse import quote, urlencode, urlparse, urlunparse
 
 try:
     import websockets
-except ImportError:  # pragma: no cover - optional at import time, required at runtime
+except ImportError:
     websockets = None
 
 import requests
 
 
 class AgentWeChatAPIError(RuntimeError):
-    """Raised when the agent-wechat API returns a non-success response."""
+    """桥接服务接口返回非成功状态时抛出。"""
 
 
 class WeChatClient:
-    """Small REST wrapper around the agent-wechat HTTP API."""
+    """对桥接服务接口的轻量封装。"""
 
     def __init__(self, base_url: str, token: str | None = None, timeout: int = 15) -> None:
         self.base_url = self._normalize_url(base_url)
@@ -135,7 +135,7 @@ Callback = Callable[..., Any | Awaitable[Any]]
 
 
 class WeChatEventWebSocketClient:
-    """Reconnectable WebSocket client for `/api/ws/events`."""
+    """用于事件流的可重连客户端。"""
 
     def __init__(
         self,
@@ -163,7 +163,7 @@ class WeChatEventWebSocketClient:
     async def run_forever(self, stop_event: asyncio.Event) -> None:
         if websockets is None:
             raise RuntimeError(
-                "The `websockets` package is required for agent-wechat event streaming."
+                "需要安装 `websockets` 包才能使用事件流。"
             )
 
         reconnect_delay = 1.0
@@ -179,6 +179,7 @@ class WeChatEventWebSocketClient:
                     max_size=4 * 1024 * 1024,
                 ) as websocket:
                     opened = True
+                    # 连接成功后重置重连退避时间。
                     reconnect_delay = 1.0
                     await self._maybe_call(self.on_open)
 
@@ -211,6 +212,7 @@ class WeChatEventWebSocketClient:
                     await asyncio.wait_for(stop_event.wait(), timeout=reconnect_delay)
                 except asyncio.TimeoutError:
                     pass
+                # 指数退避重连，避免在服务不可用时高频重试。
                 reconnect_delay = min(reconnect_delay * 2, 15.0)
             finally:
                 if opened:
