@@ -1,12 +1,14 @@
-"""AstrBot platform adapter backed by the agent-wechat REST API."""
+"""AstrBot platform adapter backed by agent-wechat WS + REST APIs."""
 
 from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import os
 import tempfile
 import time
+from contextlib import suppress
 from datetime import datetime
 from typing import Any, cast
 
@@ -31,6 +33,7 @@ from .agent_wechat_access import (
     should_forward_message,
 )
 from .agent_wechat_client import AgentWeChatAPIError, WeChatClient
+from .agent_wechat_client import WeChatEventWebSocketClient
 from .agent_wechat_event import AgentWeChatMessageEvent
 
 MSG_TYPE_TEXT = 1
@@ -55,7 +58,7 @@ CONFIG_METADATA = {
         },
         "poll_interval_ms": {
             "label": "Poll Interval",
-            "help_text": "Unread chat polling interval in milliseconds.",
+            "help_text": "Fallback REST sync interval in milliseconds when WS events are idle.",
             "field_type": "int",
         },
         "auth_poll_interval_ms": {
@@ -150,7 +153,7 @@ def _mime_to_component(path: str, mime_type: str, filename: str):
     adapter_display_name="Agent WeChat",
 )
 class AgentWeChatPlatformAdapter(Platform):
-    """Polls unread chats from agent-wechat and forwards them into AstrBot."""
+    """Uses the agent-wechat event WebSocket as the primary trigger and REST as backfill."""
 
     def __init__(
         self,
@@ -177,10 +180,13 @@ class AgentWeChatPlatformAdapter(Platform):
             token=str(self.config.get("token") or "") or None,
         )
         self.shutdown_event = asyncio.Event()
+        self.sync_event = asyncio.Event()
         self.last_seen_id: dict[str, int] = {}
         self.last_auth_check = 0.0
         self.last_auth_status: str | None = None
         self.self_id = "agent_wechat"
+        self.ws_task: asyncio.Task[None] | None = None
+        self.ws_connected = False
 
     def meta(self) -> PlatformMetadata:
         return self.metadata
@@ -190,6 +196,8 @@ class AgentWeChatPlatformAdapter(Platform):
 
     async def terminate(self) -> None:
         self.shutdown_event.set()
+        if self.ws_task is not None:
+            self.ws_task.cancel()
 
     async def send_by_session(
         self,
@@ -204,16 +212,137 @@ class AgentWeChatPlatformAdapter(Platform):
         await super().send_by_session(session, message_chain)
 
     async def run(self) -> None:
-        logger.info("[agent_wechat] adapter started")
-        while not self.shutdown_event.is_set():
-            try:
-                await self._poll_once()
-            except Exception as exc:
-                logger.exception(f"[agent_wechat] polling failed: {exc}")
-            await asyncio.sleep(max(0.1, int(self.config["poll_interval_ms"]) / 1000))
-        logger.info("[agent_wechat] adapter stopped")
+        logger.info("[agent_wechat] adapter started (WS client + REST backfill)")
+        self.ws_task = asyncio.create_task(self._run_events_ws())
+        self.sync_event.set()
+        try:
+            while not self.shutdown_event.is_set():
+                try:
+                    await asyncio.wait_for(
+                        self.sync_event.wait(),
+                        timeout=max(0.1, int(self.config["poll_interval_ms"]) / 1000),
+                    )
+                except asyncio.TimeoutError:
+                    pass
 
-    async def _poll_once(self) -> None:
+                self.sync_event.clear()
+                if self.shutdown_event.is_set():
+                    break
+
+                try:
+                    await self._sync_once()
+                except Exception as exc:
+                    logger.exception(f"[agent_wechat] sync failed: {exc}")
+        finally:
+            self.shutdown_event.set()
+            if self.ws_task is not None:
+                self.ws_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await self.ws_task
+            logger.info("[agent_wechat] adapter stopped")
+
+    async def _run_events_ws(self) -> None:
+        ws_client = WeChatEventWebSocketClient(
+            self.client.build_events_ws_url(),
+            on_open=self._on_ws_open,
+            on_message=self._on_ws_message,
+            on_close=self._on_ws_close,
+            on_error=self._on_ws_error,
+        )
+        await ws_client.run_forever(self.shutdown_event)
+
+    async def _on_ws_open(self) -> None:
+        self.ws_connected = True
+        logger.info("[agent_wechat] events websocket connected")
+        self.sync_event.set()
+
+    async def _on_ws_close(self) -> None:
+        self.ws_connected = False
+        if self.shutdown_event.is_set():
+            logger.info("[agent_wechat] events websocket closed")
+        else:
+            logger.warning("[agent_wechat] events websocket disconnected")
+
+    async def _on_ws_error(self, exc: Exception) -> None:
+        if not self.shutdown_event.is_set():
+            logger.warning(f"[agent_wechat] events websocket error: {exc}")
+
+    async def _on_ws_message(self, raw_message: str) -> None:
+        if not raw_message:
+            self.sync_event.set()
+            return
+
+        try:
+            payload = json.loads(raw_message)
+        except json.JSONDecodeError:
+            logger.debug(f"[agent_wechat] unrecognized ws payload: {raw_message[:200]}")
+            self.sync_event.set()
+            return
+
+        await self._dispatch_ws_payload(payload)
+
+    async def _dispatch_ws_payload(self, payload: Any) -> None:
+        if isinstance(payload, list):
+            for item in payload:
+                await self._dispatch_ws_payload(item)
+            return
+
+        if not isinstance(payload, dict):
+            self.sync_event.set()
+            return
+
+        event_type = str(
+            payload.get("type")
+            or payload.get("event")
+            or payload.get("kind")
+            or ""
+        )
+
+        if event_type in {"ping", "pong"}:
+            return
+
+        if event_type in {"auth", "login", "login_state", "login_success", "status"}:
+            self.last_auth_check = 0
+            self.sync_event.set()
+            return
+
+        if event_type in {"message", "message_received", "message_created", "wechat_message"}:
+            chat = payload.get("chat")
+            message = payload.get("message")
+            if isinstance(chat, dict) and isinstance(message, dict):
+                chat_id = str(chat.get("username") or chat.get("id") or "")
+                local_id = int(message.get("localId", 0) or 0)
+                if chat_id and local_id and local_id <= self.last_seen_id.get(chat_id, 0):
+                    return
+                converted = await self._convert_message(chat, message)
+                if converted is not None:
+                    await self.handle_msg(converted)
+                    if chat_id and local_id:
+                        self.last_seen_id[chat_id] = max(self.last_seen_id.get(chat_id, 0), local_id)
+                return
+
+            chat_id = payload.get("chatId") or payload.get("chat_id")
+            if chat_id:
+                await self._sync_chat_by_id(str(chat_id))
+                return
+
+        self.sync_event.set()
+
+    async def _sync_chat_by_id(self, chat_id: str) -> None:
+        try:
+            chat = await asyncio.to_thread(self.client.get_chat, chat_id)
+        except Exception as exc:
+            logger.warning(f"[agent_wechat] failed to load chat {chat_id} from ws event: {exc}")
+            self.sync_event.set()
+            return
+
+        if not chat:
+            self.sync_event.set()
+            return
+
+        await self._process_chat(chat, skip_open=False)
+
+    async def _sync_once(self) -> None:
         if not await self._refresh_auth_if_needed():
             return
 
