@@ -13,7 +13,7 @@ from datetime import datetime
 from typing import Any, cast
 
 from astrbot.api import logger
-from astrbot.api.message_components import File, Image, Plain, Record
+from astrbot.api.message_components import At, File, Image, Plain, Record
 from astrbot.api.platform import (
     AstrBotMessage,
     Group,
@@ -641,11 +641,17 @@ class AgentWeChatPlatformAdapter(Platform):
         sender_id = str(message.get("sender") or chat_id)
         sender_name = str(message.get("senderName") or sender_id or chat.get("name") or "WeChat")
         is_group = is_group_chat(chat_id) or bool(chat.get("isGroup"))
+        is_mentioned = bool(message.get("isMentioned"))
         raw_text = str(message.get("content") or "")
         normalized_text = strip_leading_mentions(raw_text) if is_group else raw_text.strip()
 
         components: list[Any] = []
         message_str_parts: list[str] = []
+
+        if is_group and is_mentioned:
+            # AstrBot 的群聊唤醒依赖消息链中的 At 组件；agent-wechat 的 isMentioned
+            # 仅是布尔标记，需要在这里显式补成 At(self_id)。
+            components.append(At(qq=self.self_id, name="bot"))
 
         if normalized_text:
             components.append(Plain(text=normalized_text))
