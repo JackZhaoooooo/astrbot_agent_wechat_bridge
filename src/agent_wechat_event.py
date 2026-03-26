@@ -18,6 +18,8 @@ from astrbot.api.platform import Group
 
 from .agent_wechat_client import WeChatClient
 
+SEND_REQUEST_TIMEOUT_SECONDS = 30.0
+
 
 def _guess_mime_type(path: str, fallback: str = "application/octet-stream") -> str:
     mime_type, _ = mimetypes.guess_type(path)
@@ -155,7 +157,19 @@ class AgentWeChatMessageEvent(AstrMessageEvent):
     ) -> None:
         payloads = await cls._build_send_payloads(chat_id, message_chain)
         for payload in payloads:
-            result = await asyncio.to_thread(client.send_message, payload)
+            try:
+                result = await asyncio.to_thread(
+                    client.send_message,
+                    payload,
+                    timeout=SEND_REQUEST_TIMEOUT_SECONDS,
+                )
+            except requests.exceptions.ReadTimeout as exc:
+                raise RuntimeError(
+                    "agent-wechat 发送超时（30秒未响应），"
+                    "请检查微信客户端是否卡在聊天切换/自动化操作中。"
+                ) from exc
+            except requests.exceptions.RequestException as exc:
+                raise RuntimeError(f"agent-wechat 发送请求失败: {exc}") from exc
             if not result.get("success", True):
                 raise RuntimeError(result.get("error") or "agent-wechat 发送失败")
 

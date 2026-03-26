@@ -78,11 +78,17 @@ class WeChatClient:
             raise AgentWeChatAPIError(f"{response.status_code}: {response.text}")
         return response.json()
 
-    def _post(self, path: str, body: dict[str, Any] | None = None) -> Any:
+    def _post(
+        self,
+        path: str,
+        body: dict[str, Any] | None = None,
+        *,
+        timeout: float | tuple[float, float] | None = None,
+    ) -> Any:
         response = self._session().post(
             f"{self.base_url}{path}",
             json=body,
-            timeout=self.timeout,
+            timeout=self.timeout if timeout is None else timeout,
         )
         if not response.ok:
             raise AgentWeChatAPIError(f"{response.status_code}: {response.text}")
@@ -142,8 +148,12 @@ class WeChatClient:
     def get_media(self, chat_id: str, local_id: int) -> dict[str, Any]:
         return self._get(f"/api/messages/{quote(chat_id)}/media/{local_id}")
 
-    def send_message(self, payload: dict[str, Any]) -> dict[str, Any]:
-        return self._post("/api/messages/send", payload)
+    def send_message(
+        self,
+        payload: dict[str, Any],
+        timeout: float | tuple[float, float] | None = None,
+    ) -> dict[str, Any]:
+        return self._post("/api/messages/send", payload, timeout=timeout)
 
 
 Callback = Callable[..., Any | Awaitable[Any]]

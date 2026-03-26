@@ -383,7 +383,7 @@ class AgentWeChatPlatformAdapter(Platform):
                 skip_open=True,
                 clear_unreads=False,
                 fetch_limit_override=FAST_PROBE_FETCH_LIMIT,
-                refresh_on_miss=True,
+                refresh_on_miss=False,
                 request_timeout_override=HOT_PATH_TIMEOUT_SECONDS,
                 first_seen_fallback_unread=1,
             )
@@ -424,8 +424,8 @@ class AgentWeChatPlatformAdapter(Platform):
             await self._process_chat(
                 chat,
                 skip_open=True,
-                clear_unreads=True,
-                refresh_on_miss=True,
+                clear_unreads=False,
+                refresh_on_miss=False,
                 request_timeout_override=HOT_PATH_TIMEOUT_SECONDS,
             )
             chat_id = str(chat.get("username") or chat.get("id") or "")
