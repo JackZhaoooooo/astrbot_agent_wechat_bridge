@@ -2,6 +2,23 @@
 
 本项目遵循“每次版本更新都记录变更”的约定。
 
+## 0.3.10 - 2026-03-26
+
+- 进一步优化低延迟链路：`chatId` 事件改为直接快速拉取消息，移除事件路径中的额外 `get_chat` 请求
+- 新增 `hot_path_timeout_ms` 配置（默认 `1200ms`），为热路径 `list_messages/open_chat` 设置超时，防止慢请求阻塞消息接收
+- 优化消息处理顺序：改为“先拉消息再按需刷新会话”，减少常见路径下的请求往返次数
+- 增加按会话加锁与快速探测并发执行，降低同一会话重复处理概率，同时减少多会话场景的串行等待
+- 默认参数继续向低时延倾斜：`poll_interval_ms=200`、`full_sync_interval_ms=900`、`fast_probe_fetch_limit=2`、`active_probe_fetch_limit=3`、`active_probe_open_chat=false`
+- 收到消息日志提早输出：在消息成功转换后先记录 `inbound accepted`，再提交 AstrBot 事件
+
+## 0.3.9 - 2026-03-26
+
+- 新增“快速探测 + 全量同步”双通道收消息策略：默认每 `300ms` 进行活跃会话快速探测，同时每 `1200ms` 或事件触发时执行全量同步
+- 新增 `fast_probe_limit`、`fast_probe_fetch_limit`、`fast_probe_open_chat`、`full_sync_interval_ms` 配置项，用于低延迟场景精细调优
+- 优化活跃会话优先级：自动维护最近活跃会话列表，优先探测最近有收发消息的会话
+- 新增“探测 miss 时轻量刷新”逻辑：快速探测未命中时执行 `open_chat(clearUnreads=false)` 再次拉取，提升消息可见性时效
+- 默认 `poll_interval_ms` 从 `1000` 调整为 `300`，降低插件侧最小探测粒度
+
 ## 0.3.8 - 2026-03-26
 
 - 优化低延迟探测链路：主动探测会话时支持 `open_chat(clearUnreads=false)` 轻量刷新，降低消息可见性滞后

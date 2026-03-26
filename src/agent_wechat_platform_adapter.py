@@ -58,12 +58,22 @@ CONFIG_METADATA = {
         },
         "poll_interval_ms": {
             "label": "Poll Interval",
-            "help_text": "Fallback REST sync interval in milliseconds when WS events are idle.",
+            "help_text": "Fast probe loop interval in milliseconds.",
+            "field_type": "int",
+        },
+        "full_sync_interval_ms": {
+            "label": "Full Sync Interval",
+            "help_text": "Interval in milliseconds for full chat list synchronization.",
             "field_type": "int",
         },
         "auth_poll_interval_ms": {
             "label": "Auth Poll Interval",
             "help_text": "Login status refresh interval in milliseconds.",
+            "field_type": "int",
+        },
+        "hot_path_timeout_ms": {
+            "label": "Hot Path Timeout",
+            "help_text": "Timeout in milliseconds for latency-sensitive list_messages/open_chat calls.",
             "field_type": "int",
         },
         "dm_policy": {
@@ -106,6 +116,21 @@ CONFIG_METADATA = {
             "help_text": "Probe latest chats directly via list_messages each sync to reduce receive latency caused by stale unread metadata.",
             "field_type": "int",
         },
+        "fast_probe_limit": {
+            "label": "Fast Probe Limit",
+            "help_text": "How many recent active chats to probe in each fast loop.",
+            "field_type": "int",
+        },
+        "fast_probe_fetch_limit": {
+            "label": "Fast Probe Fetch Limit",
+            "help_text": "Message fetch limit for each chat in fast probe.",
+            "field_type": "int",
+        },
+        "fast_probe_open_chat": {
+            "label": "Fast Probe Open Chat",
+            "help_text": "Whether fast probe should refresh chat state via open_chat(clearUnreads=false) on miss.",
+            "field_type": "bool",
+        },
         "active_probe_fetch_limit": {
             "label": "Active Probe Fetch Limit",
             "help_text": "Message fetch limit for each actively probed chat.",
@@ -132,16 +157,21 @@ CONFIG_METADATA = {
 DEFAULT_CONFIG = {
     "server_url": "http://localhost:6174",
     "token": "",
-    "poll_interval_ms": 1000,
+    "poll_interval_ms": 200,
+    "full_sync_interval_ms": 900,
     "auth_poll_interval_ms": 30000,
+    "hot_path_timeout_ms": 1200,
     "dm_policy": "open",
     "allow_from": [],
     "group_policy": "open",
     "group_allow_from": [],
     "require_mention": True,
     "active_probe_limit": 5,
-    "active_probe_fetch_limit": 5,
-    "active_probe_open_chat": True,
+    "fast_probe_limit": 2,
+    "fast_probe_fetch_limit": 2,
+    "fast_probe_open_chat": True,
+    "active_probe_fetch_limit": 3,
+    "active_probe_open_chat": False,
     "media_retry_attempts": 4,
     "media_retry_interval_ms": 250,
 }
@@ -216,12 +246,100 @@ class AgentWeChatPlatformAdapter(Platform):
         self.self_id = "agent_wechat"
         self.ws_task: asyncio.Task[None] | None = None
         self.ws_connected = False
+        self.last_full_sync_ms = 0.0
+        self.active_chat_ids: list[str] = []
+        self.chat_locks: dict[str, asyncio.Lock] = {}
 
     def meta(self) -> PlatformMetadata:
         return self.metadata
 
     def get_client(self) -> WeChatClient:
         return self.client
+
+    def _get_chat_lock(self, chat_id: str) -> asyncio.Lock:
+        lock = self.chat_locks.get(chat_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self.chat_locks[chat_id] = lock
+        return lock
+
+    def _hot_path_timeout(self) -> float | None:
+        try:
+            timeout_ms = int(self.config.get("hot_path_timeout_ms", 1200) or 1200)
+        except (TypeError, ValueError):
+            timeout_ms = 1200
+        if timeout_ms <= 0:
+            return None
+        return max(0.2, timeout_ms / 1000.0)
+
+    async def _call_client(
+        self,
+        func,
+        *args: Any,
+        timeout: float | None = None,
+    ) -> Any:
+        task = asyncio.to_thread(func, *args)
+        if timeout is None or timeout <= 0:
+            return await task
+        return await asyncio.wait_for(task, timeout=timeout)
+
+    def _touch_chat(self, chat_id: str) -> None:
+        if not chat_id:
+            return
+        if chat_id in self.active_chat_ids:
+            self.active_chat_ids.remove(chat_id)
+        self.active_chat_ids.insert(0, chat_id)
+        try:
+            keep = max(4, int(self.config.get("fast_probe_limit", 2) or 2) * 4)
+        except (TypeError, ValueError):
+            keep = 8
+        if len(self.active_chat_ids) > keep:
+            del self.active_chat_ids[keep:]
+
+    def _seed_active_chats(self, chats: list[dict[str, Any]]) -> None:
+        try:
+            seed_count = max(1, int(self.config.get("fast_probe_limit", 2) or 2) * 2)
+        except (TypeError, ValueError):
+            seed_count = 4
+        for chat in chats[:seed_count]:
+            chat_id = str(chat.get("username") or chat.get("id") or "")
+            if not chat_id or is_official_account(chat_id):
+                continue
+            self._touch_chat(chat_id)
+
+    async def _fast_probe_hot_chats(self) -> None:
+        try:
+            limit = max(0, int(self.config.get("fast_probe_limit", 2) or 2))
+        except (TypeError, ValueError):
+            limit = 2
+        if limit <= 0:
+            return
+        try:
+            fetch_limit = max(1, int(self.config.get("fast_probe_fetch_limit", 2) or 2))
+        except (TypeError, ValueError):
+            fetch_limit = 2
+        open_on_miss = bool(self.config.get("fast_probe_open_chat", True))
+        hot_timeout = self._hot_path_timeout()
+
+        tasks: list[asyncio.Task[None]] = []
+        for chat_id in list(self.active_chat_ids)[:limit]:
+            if self.shutdown_event.is_set() or not chat_id:
+                break
+            tasks.append(
+                asyncio.create_task(
+                    self._process_chat(
+                        {"id": chat_id, "username": chat_id, "unreadCount": 0},
+                        skip_open=True,
+                        clear_unreads=False,
+                        fetch_limit_override=fetch_limit,
+                        refresh_on_miss=open_on_miss,
+                        request_timeout_override=hot_timeout,
+                        first_seen_fallback_unread=1,
+                    )
+                )
+            )
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def terminate(self) -> None:
         self.shutdown_event.set()
@@ -238,6 +356,7 @@ class AgentWeChatPlatformAdapter(Platform):
             session.session_id,
             message_chain,
         )
+        self._touch_chat(str(session.session_id))
         await super().send_by_session(session, message_chain)
 
     async def run(self) -> None:
@@ -245,12 +364,14 @@ class AgentWeChatPlatformAdapter(Platform):
         self.sync_event.set()
         try:
             while not self.shutdown_event.is_set():
+                event_triggered = False
                 try:
                     # 有事件时立即同步；无事件时按轮询超时兜底。
                     await asyncio.wait_for(
                         self.sync_event.wait(),
                         timeout=max(0.1, int(self.config["poll_interval_ms"]) / 1000),
                     )
+                    event_triggered = True
                 except asyncio.TimeoutError:
                     pass
 
@@ -259,7 +380,23 @@ class AgentWeChatPlatformAdapter(Platform):
                     break
 
                 try:
-                    await self._sync_once()
+                    if not await self._refresh_auth_if_needed():
+                        continue
+
+                    await self._fast_probe_hot_chats()
+
+                    now_ms = time.time() * 1000
+                    try:
+                        full_sync_interval = max(
+                            100,
+                            int(self.config.get("full_sync_interval_ms", 900) or 900),
+                        )
+                    except (TypeError, ValueError):
+                        full_sync_interval = 900
+
+                    if event_triggered or (now_ms - self.last_full_sync_ms) >= full_sync_interval:
+                        await self._sync_once(skip_auth_check=True)
+                        self.last_full_sync_ms = now_ms
                 except Exception as exc:
                     logger.exception(f"[agent_wechat] sync failed: {exc}")
         finally:
@@ -347,15 +484,16 @@ class AgentWeChatPlatformAdapter(Platform):
                     return
                 converted = await self._convert_message(chat, message)
                 if converted is not None:
-                    await self.handle_msg(converted)
                     self._log_inbound_message(
                         source="ws",
                         chat=chat,
                         message=message,
                         session_id=converted.session_id,
                     )
+                    await self.handle_msg(converted)
                     if chat_id and local_id:
                         self.last_seen_id[chat_id] = max(self.last_seen_id.get(chat_id, 0), local_id)
+                        self._touch_chat(chat_id)
                 return
 
             chat_id = payload.get("chatId") or payload.get("chat_id")
@@ -366,24 +504,36 @@ class AgentWeChatPlatformAdapter(Platform):
         self.sync_event.set()
 
     async def _sync_chat_by_id(self, chat_id: str) -> None:
+        if not chat_id:
+            self.sync_event.set()
+            return
+
+        self._touch_chat(chat_id)
         try:
-            chat = await asyncio.to_thread(self.client.get_chat, chat_id)
+            fetch_limit = max(1, int(self.config.get("fast_probe_fetch_limit", 2) or 2))
+        except (TypeError, ValueError):
+            fetch_limit = 2
+
+        try:
+            await self._process_chat(
+                {"id": chat_id, "username": chat_id, "unreadCount": 0},
+                skip_open=True,
+                clear_unreads=False,
+                fetch_limit_override=fetch_limit,
+                refresh_on_miss=True,
+                request_timeout_override=self._hot_path_timeout(),
+                first_seen_fallback_unread=1,
+            )
         except Exception as exc:
-            logger.warning(f"[agent_wechat] failed to load chat {chat_id} from ws event: {exc}")
+            logger.warning(f"[agent_wechat] fast sync chat {chat_id} failed: {exc}")
             self.sync_event.set()
-            return
 
-        if not chat:
-            self.sync_event.set()
-            return
-
-        await self._process_chat(chat, skip_open=False)
-
-    async def _sync_once(self) -> None:
-        if not await self._refresh_auth_if_needed():
+    async def _sync_once(self, *, skip_auth_check: bool = False) -> None:
+        if not skip_auth_check and not await self._refresh_auth_if_needed():
             return
 
         chats = await asyncio.to_thread(self.client.list_chats, 50, 0)
+        self._seed_active_chats(chats)
         processed_chat_ids: set[str] = set()
         for chat in chats:
             chat_id = str(chat.get("username") or chat.get("id") or "")
@@ -408,7 +558,13 @@ class AgentWeChatPlatformAdapter(Platform):
         for chat in unread_chats:
             if self.shutdown_event.is_set():
                 break
-            await self._process_chat(chat, skip_open=False)
+            await self._process_chat(
+                chat,
+                skip_open=True,
+                clear_unreads=True,
+                refresh_on_miss=True,
+                request_timeout_override=self._hot_path_timeout(),
+            )
             chat_id = str(chat.get("username") or chat.get("id") or "")
             if chat_id:
                 processed_chat_ids.add(chat_id)
@@ -431,7 +587,12 @@ class AgentWeChatPlatformAdapter(Platform):
         for chat in catchup_chats:
             if self.shutdown_event.is_set():
                 break
-            await self._process_chat(chat, skip_open=True)
+            await self._process_chat(
+                chat,
+                skip_open=True,
+                clear_unreads=False,
+                request_timeout_override=self._hot_path_timeout(),
+            )
             chat_id = str(chat.get("username") or chat.get("id") or "")
             if chat_id:
                 processed_chat_ids.add(chat_id)
@@ -451,10 +612,10 @@ class AgentWeChatPlatformAdapter(Platform):
         if limit <= 0:
             return
         try:
-            fetch_limit = max(1, int(self.config.get("active_probe_fetch_limit", 5) or 5))
+            fetch_limit = max(1, int(self.config.get("active_probe_fetch_limit", 3) or 3))
         except (TypeError, ValueError):
-            fetch_limit = 5
-        open_chat_before_probe = bool(self.config.get("active_probe_open_chat", True))
+            fetch_limit = 3
+        open_chat_before_probe = bool(self.config.get("active_probe_open_chat", False))
 
         probed = 0
         for chat in chats:
@@ -471,6 +632,8 @@ class AgentWeChatPlatformAdapter(Platform):
                 skip_open=not open_chat_before_probe,
                 clear_unreads=False,
                 fetch_limit_override=fetch_limit,
+                request_timeout_override=self._hot_path_timeout(),
+                first_seen_fallback_unread=1,
             )
             probed += 1
 
@@ -502,44 +665,96 @@ class AgentWeChatPlatformAdapter(Platform):
         *,
         clear_unreads: bool = True,
         fetch_limit_override: int | None = None,
+        refresh_on_miss: bool = False,
+        request_timeout_override: float | None = None,
+        first_seen_fallback_unread: int = 0,
     ) -> None:
         chat_id = str(chat.get("username") or chat.get("id") or "")
         if not chat_id:
             return
 
-        if not skip_open:
-            try:
-                await asyncio.to_thread(self.client.open_chat, chat_id, clear_unreads)
-            except Exception as exc:
-                logger.warning(f"[agent_wechat] failed to open chat {chat_id}: {exc}")
+        lock = self._get_chat_lock(chat_id)
+        async with lock:
+            if fetch_limit_override is None:
+                fetch_limit = max(int(chat.get("unreadCount", 0) or 0), 8)
+            else:
+                fetch_limit = max(1, int(fetch_limit_override))
 
-        if fetch_limit_override is None:
-            fetch_limit = max(int(chat.get("unreadCount", 0) or 0), 20)
-        else:
-            fetch_limit = max(1, int(fetch_limit_override))
-        messages = await asyncio.to_thread(self.client.list_messages, chat_id, fetch_limit, 0)
-        if not messages:
-            return
+            request_timeout = request_timeout_override
 
-        new_messages = self._select_new_messages(chat_id, chat, messages)
-        if not new_messages:
-            return
+            async def list_messages() -> list[dict[str, Any]]:
+                try:
+                    result = await self._call_client(
+                        self.client.list_messages,
+                        chat_id,
+                        fetch_limit,
+                        0,
+                        timeout=request_timeout,
+                    )
+                except asyncio.TimeoutError:
+                    return []
+                return result if isinstance(result, list) else []
 
-        for message in new_messages:
-            if bool(message.get("isSelf")):
-                continue
-            converted = await self._convert_message(chat, message)
-            if converted is None:
-                continue
-            await self.handle_msg(converted)
-            self._log_inbound_message(
-                source="rest",
-                chat=chat,
-                message=message,
-                session_id=converted.session_id,
-            )
+            async def open_chat(clear_flag: bool) -> bool:
+                try:
+                    await self._call_client(
+                        self.client.open_chat,
+                        chat_id,
+                        clear_flag,
+                        timeout=request_timeout,
+                    )
+                    return True
+                except asyncio.TimeoutError:
+                    return False
+                except Exception as exc:
+                    logger.warning(f"[agent_wechat] failed to open chat {chat_id}: {exc}")
+                    return False
 
-        self.last_seen_id[chat_id] = max(int(item.get("localId", 0) or 0) for item in new_messages)
+            selection_chat = chat
+            if chat_id not in self.last_seen_id:
+                unread = int(chat.get("unreadCount", 0) or 0)
+                if unread <= 0 and first_seen_fallback_unread > 0:
+                    selection_chat = {**chat, "unreadCount": first_seen_fallback_unread}
+
+            messages = await list_messages()
+            if not messages and not skip_open:
+                if await open_chat(clear_unreads):
+                    messages = await list_messages()
+            if not messages and refresh_on_miss:
+                if await open_chat(False):
+                    messages = await list_messages()
+            if not messages:
+                return
+
+            new_messages = self._select_new_messages(chat_id, selection_chat, messages)
+            if not new_messages and refresh_on_miss:
+                if await open_chat(False):
+                    messages = await list_messages()
+                    if not messages:
+                        return
+                    new_messages = self._select_new_messages(chat_id, selection_chat, messages)
+            if not new_messages:
+                return
+
+            for message in new_messages:
+                if bool(message.get("isSelf")):
+                    continue
+                converted = await self._convert_message(chat, message)
+                if converted is None:
+                    continue
+                self._log_inbound_message(
+                    source="rest",
+                    chat=chat,
+                    message=message,
+                    session_id=converted.session_id,
+                )
+                await self.handle_msg(converted)
+
+            self.last_seen_id[chat_id] = max(int(item.get("localId", 0) or 0) for item in new_messages)
+            self._touch_chat(chat_id)
+
+            if clear_unreads and skip_open and int(chat.get("unreadCount", 0) or 0) > 0:
+                await open_chat(True)
 
     def _select_new_messages(
         self,
