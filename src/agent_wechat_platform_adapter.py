@@ -28,9 +28,7 @@ from astrbot.core.platform.astr_message_event import MessageSesion
 from .agent_wechat_access import (
     is_group_chat,
     is_official_account,
-    normalize_allowlist,
     strip_leading_mentions,
-    should_forward_message,
 )
 from .agent_wechat_client import AgentWeChatAPIError, WeChatClient
 from .agent_wechat_client import WeChatEventWebSocketClient
@@ -42,6 +40,22 @@ MSG_TYPE_VOICE = 34
 MSG_TYPE_VIDEO = 43
 MSG_TYPE_APP = 49
 MEDIA_TYPES = {MSG_TYPE_IMAGE, MSG_TYPE_VOICE, MSG_TYPE_VIDEO, MSG_TYPE_APP}
+
+# 仅保留 server_url / token 为可配置项，其余行为采用固定策略。
+POLL_INTERVAL_MS = 200
+FULL_SYNC_INTERVAL_MS = 1200
+AUTH_POLL_INTERVAL_MS = 30000
+HOT_PATH_TIMEOUT_SECONDS = 0.8
+FAST_PROBE_LIMIT = 1
+FAST_PROBE_FETCH_LIMIT = 1
+FAST_PROBE_OPEN_CHAT_ON_MISS = False
+ACTIVE_PROBE_LIMIT = 2
+ACTIVE_PROBE_FETCH_LIMIT = 2
+ACTIVE_PROBE_OPEN_CHAT = False
+ACTIVE_CHAT_KEEP = 8
+ACTIVE_CHAT_SEED = 2
+MEDIA_RETRY_ATTEMPTS = 4
+MEDIA_RETRY_INTERVAL_SECONDS = 0.25
 
 CONFIG_METADATA = {
     "en-US": {
@@ -56,124 +70,12 @@ CONFIG_METADATA = {
             "field_type": "str",
             "secret": True,
         },
-        "poll_interval_ms": {
-            "label": "轮询间隔（毫秒）",
-            "help_text": "快速探测循环的执行间隔。值越小收消息越快，但请求频率更高。",
-            "field_type": "int",
-        },
-        "full_sync_interval_ms": {
-            "label": "全量同步间隔（毫秒）",
-            "help_text": "执行一次会话列表全量同步的间隔，用于兜底补偿漏掉的消息。",
-            "field_type": "int",
-        },
-        "auth_poll_interval_ms": {
-            "label": "登录状态检查间隔（毫秒）",
-            "help_text": "轮询登录态的间隔；用于检测掉线、token 失效等状态变化。",
-            "field_type": "int",
-        },
-        "hot_path_timeout_ms": {
-            "label": "热路径超时（毫秒）",
-            "help_text": "对低延迟路径的 list_messages/open_chat 调用设置超时，防止慢请求阻塞主循环。",
-            "field_type": "int",
-        },
-        "dm_policy": {
-            "label": "私聊策略",
-            "help_text": "私聊消息转发策略：open=全部转发，allowlist=仅白名单，disabled=禁用。",
-            "field_type": "select",
-            "options": [
-                {"label": "全部转发", "value": "open"},
-                {"label": "仅白名单", "value": "allowlist"},
-                {"label": "禁用", "value": "disabled"},
-            ],
-        },
-        "allow_from": {
-            "label": "私聊白名单",
-            "help_text": "当私聊策略为 allowlist 时生效。填写允许的发送者 ID（wxid）列表。",
-            "field_type": "list",
-        },
-        "group_policy": {
-            "label": "群聊策略",
-            "help_text": "群聊消息转发策略：open=全部转发，allowlist=仅白名单，disabled=禁用。",
-            "field_type": "select",
-            "options": [
-                {"label": "全部转发", "value": "open"},
-                {"label": "仅白名单", "value": "allowlist"},
-                {"label": "禁用", "value": "disabled"},
-            ],
-        },
-        "group_allow_from": {
-            "label": "群聊发送者白名单",
-            "help_text": "当群聊策略为 allowlist 时生效。填写允许触发机器人的群成员 ID（wxid）列表。",
-            "field_type": "list",
-        },
-        "require_mention": {
-            "label": "群聊必须 @ 机器人",
-            "help_text": "开启后，群聊里只有 @ 机器人的消息才会转发到 AstrBot。",
-            "field_type": "bool",
-        },
-        "active_probe_limit": {
-            "label": "主动探测会话数",
-            "help_text": "每轮同步时主动探测的会话数量上限，用于缓解未读元数据滞后导致的收消息延迟。",
-            "field_type": "int",
-        },
-        "fast_probe_limit": {
-            "label": "快速探测会话数",
-            "help_text": "每轮快速探测时要处理的最近活跃会话数量。",
-            "field_type": "int",
-        },
-        "fast_probe_fetch_limit": {
-            "label": "快速探测拉取条数",
-            "help_text": "快速探测单个会话时，每次最多拉取的消息条数。",
-            "field_type": "int",
-        },
-        "fast_probe_open_chat": {
-            "label": "快速探测失败时刷新会话",
-            "help_text": "快速探测未命中时是否调用 open_chat(clearUnreads=false) 触发轻量刷新。若上游 open_chat 偏慢，建议关闭。",
-            "field_type": "bool",
-        },
-        "active_probe_fetch_limit": {
-            "label": "主动探测拉取条数",
-            "help_text": "主动探测单个会话时，每次最多拉取的消息条数。",
-            "field_type": "int",
-        },
-        "active_probe_open_chat": {
-            "label": "主动探测前刷新会话",
-            "help_text": "主动探测前是否调用 open_chat 刷新会话状态。若出现明显延迟，建议关闭。",
-            "field_type": "bool",
-        },
-        "media_retry_attempts": {
-            "label": "媒体重试次数",
-            "help_text": "媒体消息数据暂未就绪时的重试次数。",
-            "field_type": "int",
-        },
-        "media_retry_interval_ms": {
-            "label": "媒体重试间隔（毫秒）",
-            "help_text": "媒体重试之间的等待时间。",
-            "field_type": "int",
-        },
     }
 }
 
 DEFAULT_CONFIG = {
     "server_url": "http://localhost:6174",
     "token": "",
-    "poll_interval_ms": 200,
-    "full_sync_interval_ms": 900,
-    "auth_poll_interval_ms": 30000,
-    "hot_path_timeout_ms": 1200,
-    "dm_policy": "open",
-    "allow_from": [],
-    "group_policy": "open",
-    "group_allow_from": [],
-    "require_mention": True,
-    "active_probe_limit": 5,
-    "fast_probe_limit": 2,
-    "fast_probe_fetch_limit": 2,
-    "fast_probe_open_chat": True,
-    "active_probe_fetch_limit": 3,
-    "active_probe_open_chat": False,
-    "media_retry_attempts": 4,
-    "media_retry_interval_ms": 250,
 }
 
 
@@ -263,15 +165,6 @@ class AgentWeChatPlatformAdapter(Platform):
             self.chat_locks[chat_id] = lock
         return lock
 
-    def _hot_path_timeout(self) -> float | None:
-        try:
-            timeout_ms = int(self.config.get("hot_path_timeout_ms", 1200) or 1200)
-        except (TypeError, ValueError):
-            timeout_ms = 1200
-        if timeout_ms <= 0:
-            return None
-        return max(0.2, timeout_ms / 1000.0)
-
     async def _call_client(
         self,
         func,
@@ -289,40 +182,22 @@ class AgentWeChatPlatformAdapter(Platform):
         if chat_id in self.active_chat_ids:
             self.active_chat_ids.remove(chat_id)
         self.active_chat_ids.insert(0, chat_id)
-        try:
-            keep = max(4, int(self.config.get("fast_probe_limit", 2) or 2) * 4)
-        except (TypeError, ValueError):
-            keep = 8
-        if len(self.active_chat_ids) > keep:
-            del self.active_chat_ids[keep:]
+        if len(self.active_chat_ids) > ACTIVE_CHAT_KEEP:
+            del self.active_chat_ids[ACTIVE_CHAT_KEEP:]
 
     def _seed_active_chats(self, chats: list[dict[str, Any]]) -> None:
-        try:
-            seed_count = max(1, int(self.config.get("fast_probe_limit", 2) or 2) * 2)
-        except (TypeError, ValueError):
-            seed_count = 4
-        for chat in chats[:seed_count]:
+        for chat in chats[:ACTIVE_CHAT_SEED]:
             chat_id = str(chat.get("username") or chat.get("id") or "")
             if not chat_id or is_official_account(chat_id):
                 continue
             self._touch_chat(chat_id)
 
     async def _fast_probe_hot_chats(self) -> None:
-        try:
-            limit = max(0, int(self.config.get("fast_probe_limit", 2) or 2))
-        except (TypeError, ValueError):
-            limit = 2
-        if limit <= 0:
+        if FAST_PROBE_LIMIT <= 0:
             return
-        try:
-            fetch_limit = max(1, int(self.config.get("fast_probe_fetch_limit", 2) or 2))
-        except (TypeError, ValueError):
-            fetch_limit = 2
-        open_on_miss = bool(self.config.get("fast_probe_open_chat", True))
-        hot_timeout = self._hot_path_timeout()
 
         tasks: list[asyncio.Task[None]] = []
-        for chat_id in list(self.active_chat_ids)[:limit]:
+        for chat_id in list(self.active_chat_ids)[:FAST_PROBE_LIMIT]:
             if self.shutdown_event.is_set() or not chat_id:
                 break
             tasks.append(
@@ -331,9 +206,9 @@ class AgentWeChatPlatformAdapter(Platform):
                         {"id": chat_id, "username": chat_id, "unreadCount": 0},
                         skip_open=True,
                         clear_unreads=False,
-                        fetch_limit_override=fetch_limit,
-                        refresh_on_miss=open_on_miss,
-                        request_timeout_override=hot_timeout,
+                        fetch_limit_override=FAST_PROBE_FETCH_LIMIT,
+                        refresh_on_miss=FAST_PROBE_OPEN_CHAT_ON_MISS,
+                        request_timeout_override=HOT_PATH_TIMEOUT_SECONDS,
                         first_seen_fallback_unread=1,
                     )
                 )
@@ -369,7 +244,7 @@ class AgentWeChatPlatformAdapter(Platform):
                     # 有事件时立即同步；无事件时按轮询超时兜底。
                     await asyncio.wait_for(
                         self.sync_event.wait(),
-                        timeout=max(0.1, int(self.config["poll_interval_ms"]) / 1000),
+                        timeout=max(0.1, POLL_INTERVAL_MS / 1000),
                     )
                     event_triggered = True
                 except asyncio.TimeoutError:
@@ -386,15 +261,7 @@ class AgentWeChatPlatformAdapter(Platform):
                     await self._fast_probe_hot_chats()
 
                     now_ms = time.time() * 1000
-                    try:
-                        full_sync_interval = max(
-                            100,
-                            int(self.config.get("full_sync_interval_ms", 900) or 900),
-                        )
-                    except (TypeError, ValueError):
-                        full_sync_interval = 900
-
-                    if event_triggered or (now_ms - self.last_full_sync_ms) >= full_sync_interval:
+                    if event_triggered or (now_ms - self.last_full_sync_ms) >= FULL_SYNC_INTERVAL_MS:
                         await self._sync_once(skip_auth_check=True)
                         self.last_full_sync_ms = now_ms
                 except Exception as exc:
@@ -509,19 +376,15 @@ class AgentWeChatPlatformAdapter(Platform):
             return
 
         self._touch_chat(chat_id)
-        try:
-            fetch_limit = max(1, int(self.config.get("fast_probe_fetch_limit", 2) or 2))
-        except (TypeError, ValueError):
-            fetch_limit = 2
 
         try:
             await self._process_chat(
                 {"id": chat_id, "username": chat_id, "unreadCount": 0},
                 skip_open=True,
                 clear_unreads=False,
-                fetch_limit_override=fetch_limit,
+                fetch_limit_override=FAST_PROBE_FETCH_LIMIT,
                 refresh_on_miss=True,
-                request_timeout_override=self._hot_path_timeout(),
+                request_timeout_override=HOT_PATH_TIMEOUT_SECONDS,
                 first_seen_fallback_unread=1,
             )
         except Exception as exc:
@@ -563,7 +426,7 @@ class AgentWeChatPlatformAdapter(Platform):
                 skip_open=True,
                 clear_unreads=True,
                 refresh_on_miss=True,
-                request_timeout_override=self._hot_path_timeout(),
+                request_timeout_override=HOT_PATH_TIMEOUT_SECONDS,
             )
             chat_id = str(chat.get("username") or chat.get("id") or "")
             if chat_id:
@@ -591,7 +454,7 @@ class AgentWeChatPlatformAdapter(Platform):
                 chat,
                 skip_open=True,
                 clear_unreads=False,
-                request_timeout_override=self._hot_path_timeout(),
+                request_timeout_override=HOT_PATH_TIMEOUT_SECONDS,
             )
             chat_id = str(chat.get("username") or chat.get("id") or "")
             if chat_id:
@@ -605,21 +468,12 @@ class AgentWeChatPlatformAdapter(Platform):
         processed_chat_ids: set[str],
     ) -> None:
         """主动探测最近会话，绕过未读元数据更新滞后。"""
-        try:
-            limit = max(0, int(self.config.get("active_probe_limit", 5) or 0))
-        except (TypeError, ValueError):
-            limit = 5
-        if limit <= 0:
+        if ACTIVE_PROBE_LIMIT <= 0:
             return
-        try:
-            fetch_limit = max(1, int(self.config.get("active_probe_fetch_limit", 3) or 3))
-        except (TypeError, ValueError):
-            fetch_limit = 3
-        open_chat_before_probe = bool(self.config.get("active_probe_open_chat", False))
 
         probed = 0
         for chat in chats:
-            if self.shutdown_event.is_set() or probed >= limit:
+            if self.shutdown_event.is_set() or probed >= ACTIVE_PROBE_LIMIT:
                 break
             chat_id = str(chat.get("username") or chat.get("id") or "")
             if not chat_id or chat_id in processed_chat_ids:
@@ -629,17 +483,17 @@ class AgentWeChatPlatformAdapter(Platform):
 
             await self._process_chat(
                 chat,
-                skip_open=not open_chat_before_probe,
+                skip_open=not ACTIVE_PROBE_OPEN_CHAT,
                 clear_unreads=False,
-                fetch_limit_override=fetch_limit,
-                request_timeout_override=self._hot_path_timeout(),
+                fetch_limit_override=ACTIVE_PROBE_FETCH_LIMIT,
+                request_timeout_override=HOT_PATH_TIMEOUT_SECONDS,
                 first_seen_fallback_unread=1,
             )
             probed += 1
 
     async def _refresh_auth_if_needed(self) -> bool:
         now_ms = time.time() * 1000
-        if now_ms - self.last_auth_check < int(self.config["auth_poll_interval_ms"]):
+        if now_ms - self.last_auth_check < AUTH_POLL_INTERVAL_MS:
             return self.last_auth_status == "logged_in"
 
         self.last_auth_check = now_ms
@@ -789,20 +643,6 @@ class AgentWeChatPlatformAdapter(Platform):
         is_group = is_group_chat(chat_id) or bool(chat.get("isGroup"))
         raw_text = str(message.get("content") or "")
         normalized_text = strip_leading_mentions(raw_text) if is_group else raw_text.strip()
-        was_mentioned = bool(message.get("isMentioned"))
-
-        allowed, reason = should_forward_message(
-            is_group=is_group,
-            sender_id=sender_id,
-            was_mentioned=was_mentioned,
-            require_mention=bool(self.config.get("require_mention", True)),
-            dm_policy=str(self.config.get("dm_policy", "open")),
-            dm_allowlist=normalize_allowlist(self.config.get("allow_from")),
-            group_policy=str(self.config.get("group_policy", "open")),
-            group_allowlist=normalize_allowlist(self.config.get("group_allow_from")),
-        )
-        if not allowed:
-            return None
 
         components: list[Any] = []
         message_str_parts: list[str] = []
@@ -887,20 +727,8 @@ class AgentWeChatPlatformAdapter(Platform):
         chat_id: str,
         local_id: int,
     ) -> tuple[str, str, str] | None:
-        try:
-            max_attempts = max(1, int(self.config.get("media_retry_attempts", 4) or 4))
-        except (TypeError, ValueError):
-            max_attempts = 4
-        try:
-            retry_interval = max(
-                0.0,
-                float(self.config.get("media_retry_interval_ms", 250) or 250) / 1000.0,
-            )
-        except (TypeError, ValueError):
-            retry_interval = 0.25
-
         result: dict[str, Any] | None = None
-        for attempt in range(max_attempts):
+        for attempt in range(MEDIA_RETRY_ATTEMPTS):
             try:
                 candidate = await asyncio.to_thread(self.client.get_media, chat_id, local_id)
             except AgentWeChatAPIError as exc:
@@ -915,9 +743,9 @@ class AgentWeChatPlatformAdapter(Platform):
             if candidate.get("data"):
                 result = candidate
                 break
-            if attempt < max_attempts - 1 and retry_interval > 0:
+            if attempt < MEDIA_RETRY_ATTEMPTS - 1 and MEDIA_RETRY_INTERVAL_SECONDS > 0:
                 # 上游媒体落库可能有延迟，短暂等待后重试。
-                await asyncio.sleep(retry_interval)
+                await asyncio.sleep(MEDIA_RETRY_INTERVAL_SECONDS)
 
         if result is None:
             return None

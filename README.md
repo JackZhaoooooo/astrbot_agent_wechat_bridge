@@ -43,7 +43,7 @@ flowchart LR
 - 将微信私聊和群聊消息转换为 AstrBot 事件
 - 将 AstrBot 的回复通过 `agent-wechat` 发回微信
 - 支持文本、图片、文件、语音类消息发送
-- 支持私聊白名单、群聊白名单、群聊 `@` 触发
+- 配置项极简：仅需服务地址与访问令牌
 
 ## 运行前提
 
@@ -83,23 +83,16 @@ AstrBot 加载插件后，在平台管理中添加 `agent_wechat`，配置项如
 | --- | --- | --- |
 | `server_url` | `http://localhost:6174` | `agent-wechat` REST API 地址 |
 | `token` | 空 | 如果服务开启鉴权，填写 Bearer Token |
-| `poll_interval_ms` | `200` | 快速探测循环间隔（毫秒） |
-| `full_sync_interval_ms` | `900` | 全量会话同步间隔（毫秒） |
-| `auth_poll_interval_ms` | `30000` | 登录状态检查间隔 |
-| `hot_path_timeout_ms` | `1200` | 低延迟热路径（`list_messages/open_chat`）超时阈值（毫秒） |
-| `dm_policy` | `open` | 私聊策略：`open` / `allowlist` / `disabled` |
-| `allow_from` | `[]` | 私聊白名单，`dm_policy=allowlist` 时生效 |
-| `group_policy` | `open` | 群聊策略：`open` / `allowlist` / `disabled` |
-| `group_allow_from` | `[]` | 群聊发送者白名单，`group_policy=allowlist` 时生效 |
-| `require_mention` | `true` | 群聊中是否必须 `@机器人` 才转发给 AstrBot |
-| `active_probe_limit` | `5` | 每轮主动探测的会话数量上限 |
-| `fast_probe_limit` | `2` | 每轮快速探测的活跃会话数量 |
-| `fast_probe_fetch_limit` | `2` | 快速探测单会话拉取消息条数 |
-| `fast_probe_open_chat` | `true` | 快速探测未命中时是否执行 `open_chat(clearUnreads=false)` 轻量刷新 |
-| `active_probe_fetch_limit` | `3` | 主动探测单会话拉取消息条数 |
-| `active_probe_open_chat` | `false` | 主动探测前是否执行 `open_chat(clearUnreads=false)` 轻量刷新 |
-| `media_retry_attempts` | `4` | 媒体消息拉取重试次数 |
-| `media_retry_interval_ms` | `250` | 媒体消息重试间隔（毫秒） |
+
+插件内置固定策略（无需配置）：
+
+- 收消息探测：`poll=200ms`，全量同步 `1200ms`
+- 探测路径：`fast_probe_limit=1`、`fast_probe_fetch_limit=1`、`fast_probe_open_chat=false`
+- 主动补偿：`active_probe_limit=2`、`active_probe_fetch_limit=2`、`active_probe_open_chat=false`
+- 登录态检查：`30000ms`
+- 热路径超时：`800ms`
+- 媒体重试：`4` 次，每次间隔 `250ms`
+- 消息转发策略：私聊/群聊均默认转发，不再提供白名单与 `@` 触发配置项
 
 也可以直接在 `cmd_config.json` 的 `platform` 数组里确保存在如下项：
 
@@ -109,24 +102,7 @@ AstrBot 加载插件后，在平台管理中添加 `agent_wechat`，配置项如
   "type": "agent_wechat",
   "enable": true,
   "server_url": "http://localhost:6174",
-  "token": "你的_agent_wechat_token",
-  "poll_interval_ms": 200,
-  "full_sync_interval_ms": 900,
-  "auth_poll_interval_ms": 30000,
-  "hot_path_timeout_ms": 1200,
-  "dm_policy": "open",
-  "allow_from": [],
-  "group_policy": "open",
-  "group_allow_from": [],
-  "require_mention": true,
-  "active_probe_limit": 5,
-  "fast_probe_limit": 2,
-  "fast_probe_fetch_limit": 2,
-  "fast_probe_open_chat": true,
-  "active_probe_fetch_limit": 3,
-  "active_probe_open_chat": false,
-  "media_retry_attempts": 4,
-  "media_retry_interval_ms": 250
+  "token": "你的_agent_wechat_token"
 }
 ```
 
@@ -137,14 +113,8 @@ AstrBot 加载插件后，在平台管理中添加 `agent_wechat`，配置项如
   - 检查 `token` 是否正确。若 `curl http://localhost:6174/api/status/auth` 返回 `Unauthorized`，说明必须携带 token
 - 日志里显示已收到消息但没有进入对话：
   - 检查 AstrBot 全局白名单。若开启 `enable_id_white_list=true`，需把会话 ID（如 `agent_wechat:FriendMessage:wxid_xxx`）加入 `id_whitelist`
-- 群里发消息没触发：
-  - 默认 `require_mention=true`，需要 `@机器人` 才会转发到 AstrBot
 - 消息进入 AstrBot 有明显延迟（如十几秒）：
-  - 先确认 `fast_probe_limit>=1`、`fast_probe_fetch_limit=1~3`、`fast_probe_open_chat=true`
-  - 再确认 `poll_interval_ms=150~300`、`full_sync_interval_ms=700~1200`
-  - `hot_path_timeout_ms` 建议 `800~1500`，避免慢请求阻塞低延迟探测
-  - 若消息仍慢，可逐步提高 `fast_probe_limit`（建议最大不超过 `4`，避免接口负载过高）
-  - 若消息里媒体较多，可适当降低 `media_retry_attempts` 或 `media_retry_interval_ms`，减少单轮阻塞时间
+  - 本插件已内置低延迟参数；若仍有明显延迟，优先检查 `agent-wechat` 侧 `open_chat` 调用是否耗时异常
 - 发送后想看是否收到了：
   - 查看 AstrBot 日志中的 `[agent_wechat] inbound accepted ...`
 
