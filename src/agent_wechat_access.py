@@ -7,6 +7,7 @@ import re
 DM_POLICIES = {"open", "allowlist", "disabled"}
 GROUP_POLICIES = {"open", "allowlist", "disabled"}
 INVISIBLE_TEXT_RE = re.compile(r"[\u200b-\u200f\u202a-\u202e\u2060-\u206f]")
+MENTION_SPLIT_RE = re.compile(r"[\u2005\s]+")
 
 
 def normalize_wechat_id(raw: str | None) -> str:
@@ -31,12 +32,57 @@ def strip_leading_mentions(text: str) -> str:
     if not cleaned:
         return ""
 
-    parts = [part.strip() for part in re.split(r"\u2005+", cleaned) if part.strip()]
+    parts = [part.strip() for part in MENTION_SPLIT_RE.split(cleaned) if part.strip()]
     while parts and parts[0].startswith(("@", "＠")):
         parts.pop(0)
     if parts:
         return " ".join(parts).strip()
     return cleaned
+
+
+def _normalize_mention_target(raw: str | None) -> str:
+    if not raw:
+        return ""
+    cleaned = INVISIBLE_TEXT_RE.sub("", str(raw)).strip()
+    if cleaned.startswith(("@", "＠")):
+        cleaned = cleaned[1:]
+    return cleaned.strip().casefold()
+
+
+def extract_leading_mentions(text: str) -> list[str]:
+    """提取消息开头连续 @ 提及目标（已归一化）。"""
+
+    cleaned = INVISIBLE_TEXT_RE.sub("", text or "").strip()
+    if not cleaned:
+        return []
+
+    parts = [part.strip() for part in MENTION_SPLIT_RE.split(cleaned) if part.strip()]
+    mentions: list[str] = []
+    for part in parts:
+        if not part.startswith(("@", "＠")):
+            break
+        target = _normalize_mention_target(part)
+        if target:
+            mentions.append(target)
+    return mentions
+
+
+def is_leading_self_mention(text: str, aliases: list[str] | set[str] | tuple[str, ...]) -> bool:
+    """判断消息开头是否 @ 了机器人本人（按别名集合匹配）。"""
+
+    mention_targets = extract_leading_mentions(text)
+    if not mention_targets:
+        return False
+
+    normalized_aliases = {
+        alias
+        for alias in (_normalize_mention_target(item) for item in aliases)
+        if alias
+    }
+    if not normalized_aliases:
+        return False
+
+    return any(target in normalized_aliases for target in mention_targets)
 
 
 def is_official_account(chat_id: str) -> bool:

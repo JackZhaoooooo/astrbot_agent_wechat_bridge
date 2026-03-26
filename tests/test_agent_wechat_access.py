@@ -1,4 +1,6 @@
 from src.agent_wechat_access import (
+    extract_leading_mentions,
+    is_leading_self_mention,
     is_group_chat,
     is_sender_allowed,
     normalize_allowlist,
@@ -20,6 +22,17 @@ def test_normalize_allowlist_deduplicates() -> None:
 def test_strip_leading_mentions() -> None:
     text = "@Bot\u2005@Alice\u2005 hello there"
     assert strip_leading_mentions(text) == "hello there"
+
+
+def test_extract_leading_mentions() -> None:
+    text = "@小暹罗\u2005@Alice\u2005 hello there"
+    assert extract_leading_mentions(text) == ["小暹罗", "alice"]
+
+
+def test_is_leading_self_mention() -> None:
+    text = "@小暹罗\u2005hi"
+    assert is_leading_self_mention(text, {"wx-小暹罗", "小暹罗"}) is True
+    assert is_leading_self_mention("@Chill\u2005hi", {"小暹罗"}) is False
 
 
 def test_group_chat_detection() -> None:

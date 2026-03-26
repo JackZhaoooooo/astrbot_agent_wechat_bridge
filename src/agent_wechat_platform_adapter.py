@@ -6,6 +6,7 @@ import asyncio
 import base64
 import json
 import os
+import re
 import tempfile
 import time
 from contextlib import suppress
@@ -26,6 +27,7 @@ from astrbot.api.platform import (
 from astrbot.core.platform.astr_message_event import MessageSesion
 
 from .agent_wechat_access import (
+    is_leading_self_mention,
     is_group_chat,
     is_official_account,
     strip_leading_mentions,
@@ -56,6 +58,7 @@ ACTIVE_CHAT_KEEP = 8
 ACTIVE_CHAT_SEED = 2
 MEDIA_RETRY_ATTEMPTS = 4
 MEDIA_RETRY_INTERVAL_SECONDS = 0.25
+SELF_ID_ALIAS_RE = re.compile(r"^(wxid_[^_]+)(?:_[0-9a-fA-F]{4,})$")
 
 CONFIG_METADATA = {
     "en-US": {
@@ -146,6 +149,9 @@ class AgentWeChatPlatformAdapter(Platform):
         self.last_auth_check = 0.0
         self.last_auth_status: str | None = None
         self.self_id = "agent_wechat"
+        self.self_aliases: set[str] = set()
+        self._add_self_alias(self.self_id)
+        self._add_self_alias(self.config.get("id"))
         self.ws_task: asyncio.Task[None] | None = None
         self.ws_connected = False
         self.last_full_sync_ms = 0.0
@@ -157,6 +163,34 @@ class AgentWeChatPlatformAdapter(Platform):
 
     def get_client(self) -> WeChatClient:
         return self.client
+
+    @staticmethod
+    def _normalize_alias(value: str | None) -> str:
+        if not value:
+            return ""
+        alias = str(value).strip()
+        if alias.startswith("wx-"):
+            alias = alias[3:]
+        return alias.strip()
+
+    def _add_self_alias(self, value: str | None) -> None:
+        if not value:
+            return
+        alias = str(value).strip()
+        if not alias:
+            return
+
+        candidates = {alias}
+        normalized = self._normalize_alias(alias)
+        if normalized:
+            candidates.add(normalized)
+        match = SELF_ID_ALIAS_RE.match(alias)
+        if match:
+            candidates.add(match.group(1))
+
+        for item in candidates:
+            if item:
+                self.self_aliases.add(item)
 
     def _get_chat_lock(self, chat_id: str) -> asyncio.Lock:
         lock = self.chat_locks.get(chat_id)
@@ -507,6 +541,7 @@ class AgentWeChatPlatformAdapter(Platform):
         self.last_auth_status = str(auth.get("status") or "unknown")
         if auth.get("loggedInUser"):
             self.self_id = str(auth["loggedInUser"])
+            self._add_self_alias(self.self_id)
 
         if self.last_auth_status != "logged_in":
             return False
@@ -592,6 +627,8 @@ class AgentWeChatPlatformAdapter(Platform):
 
             for message in new_messages:
                 if bool(message.get("isSelf")):
+                    self._add_self_alias(message.get("sender"))
+                    self._add_self_alias(message.get("senderName"))
                     continue
                 converted = await self._convert_message(chat, message)
                 if converted is None:
@@ -641,8 +678,11 @@ class AgentWeChatPlatformAdapter(Platform):
         sender_id = str(message.get("sender") or chat_id)
         sender_name = str(message.get("senderName") or sender_id or chat.get("name") or "WeChat")
         is_group = is_group_chat(chat_id) or bool(chat.get("isGroup"))
-        is_mentioned = bool(message.get("isMentioned"))
         raw_text = str(message.get("content") or "")
+        is_mentioned = bool(message.get("isMentioned"))
+        if is_group and not is_mentioned and raw_text:
+            # 某些上游场景下 isMentioned 可能缺失；用消息开头 @ 与机器人别名做兜底匹配。
+            is_mentioned = is_leading_self_mention(raw_text, self.self_aliases)
         normalized_text = strip_leading_mentions(raw_text) if is_group else raw_text.strip()
 
         components: list[Any] = []
@@ -718,6 +758,7 @@ class AgentWeChatPlatformAdapter(Platform):
         local_id = int(message.get("localId", 0) or 0)
         raw_type = int(message.get("type", 0) or 0)
         base_type = raw_type & 0x7FFFFFFF
+        mentioned = message.get("isMentioned")
         logger.info(
             "[agent_wechat] inbound accepted "
             f"source={source} "
@@ -725,6 +766,7 @@ class AgentWeChatPlatformAdapter(Platform):
             f"sender={sender_id} "
             f"localId={local_id} "
             f"type={base_type} "
+            f"isMentioned={mentioned} "
             f"session={session_id}"
         )
 
