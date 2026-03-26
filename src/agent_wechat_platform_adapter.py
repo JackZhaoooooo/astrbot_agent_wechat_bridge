@@ -683,6 +683,9 @@ class AgentWeChatPlatformAdapter(Platform):
         if is_group and not is_mentioned and raw_text:
             # 某些上游场景下 isMentioned 可能缺失；用消息开头 @ 与机器人别名做兜底匹配。
             is_mentioned = is_leading_self_mention(raw_text, self.self_aliases)
+        if is_group:
+            # 当前桥接策略：群聊默认自动唤醒，不再要求显式 @ 机器人。
+            is_mentioned = True
         normalized_text = strip_leading_mentions(raw_text) if is_group else raw_text.strip()
 
         components: list[Any] = []
