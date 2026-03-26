@@ -87,7 +87,6 @@ AstrBot 加载插件后，在平台管理中添加 `agent_wechat`，配置项如
 | `full_sync_interval_ms` | `900` | 全量会话同步间隔（毫秒） |
 | `auth_poll_interval_ms` | `30000` | 登录状态检查间隔 |
 | `hot_path_timeout_ms` | `1200` | 低延迟热路径（`list_messages/open_chat`）超时阈值（毫秒） |
-| `outbound_guard_ms` | `1800` | 发送保护窗口（毫秒）。在该窗口内抑制 `open_chat`，避免与发送流程争抢会话焦点 |
 | `dm_policy` | `open` | 私聊策略：`open` / `allowlist` / `disabled` |
 | `allow_from` | `[]` | 私聊白名单，`dm_policy=allowlist` 时生效 |
 | `group_policy` | `open` | 群聊策略：`open` / `allowlist` / `disabled` |
@@ -115,7 +114,6 @@ AstrBot 加载插件后，在平台管理中添加 `agent_wechat`，配置项如
   "full_sync_interval_ms": 900,
   "auth_poll_interval_ms": 30000,
   "hot_path_timeout_ms": 1200,
-  "outbound_guard_ms": 1800,
   "dm_policy": "open",
   "allow_from": [],
   "group_policy": "open",
@@ -149,9 +147,6 @@ AstrBot 加载插件后，在平台管理中添加 `agent_wechat`，配置项如
   - 若消息里媒体较多，可适当降低 `media_retry_attempts` 或 `media_retry_interval_ms`，减少单轮阻塞时间
 - 发送后想看是否收到了：
   - 查看 AstrBot 日志中的 `[agent_wechat] inbound accepted ...`
-- 群里能收消息但机器人不回：
-  - 确认 `outbound_guard_ms` 不为 `0`（默认 `1800`）
-  - 若仍偶发失败，可提高到 `2000~3000`，减少探测与发送同时抢焦点
 
 ## 实现细节
 

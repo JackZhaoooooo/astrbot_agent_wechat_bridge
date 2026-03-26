@@ -6,7 +6,7 @@ import asyncio
 import base64
 import mimetypes
 import os
-from collections.abc import AsyncGenerator, Awaitable, Callable
+from collections.abc import AsyncGenerator
 from typing import Any
 
 import requests
@@ -54,7 +54,6 @@ class AgentWeChatMessageEvent(AstrMessageEvent):
         client: WeChatClient,
         chat_id: str,
         is_group: bool,
-        send_message_callable: Callable[[str, MessageChain], Awaitable[None]] | None = None,
     ) -> None:
         super().__init__(
             message_str=message_str,
@@ -65,7 +64,6 @@ class AgentWeChatMessageEvent(AstrMessageEvent):
         self.client = client
         self.chat_id = chat_id
         self.is_group = is_group
-        self.send_message_callable = send_message_callable
 
     @staticmethod
     def _push_text(buffer: list[str], value: str | None) -> None:
@@ -162,10 +160,7 @@ class AgentWeChatMessageEvent(AstrMessageEvent):
                 raise RuntimeError(result.get("error") or "agent-wechat 发送失败")
 
     async def send(self, message: MessageChain) -> None:
-        if self.send_message_callable is not None:
-            await self.send_message_callable(self.chat_id, message)
-        else:
-            await self.send_message_chain(self.client, self.chat_id, message)
+        await self.send_message_chain(self.client, self.chat_id, message)
         await super().send(message)
 
     async def send_streaming(
