@@ -250,6 +250,34 @@ def test_build_send_payloads_serialized_nodes_preserve_original_text():
     ]
 
 
+def test_build_send_payloads_ignores_serialized_reply_component():
+    module = _load_event_module()
+
+    class SerializedReply:
+        async def to_dict(self):
+            return {
+                "type": "reply",
+                "data": {
+                    "id": "wechat:46094226262@chatroom:380",
+                    "chain": [],
+                    "sender_id": 0,
+                    "sender_nickname": "",
+                    "time": 0,
+                    "message_str": "",
+                    "text": "",
+                    "qq": 0,
+                    "seq": 0,
+                },
+            }
+
+    chain = module.MessageChain([SerializedReply(), module.Plain(text="保留正文")])
+    payloads = asyncio.run(
+        module.AgentWeChatMessageEvent._build_send_payloads("chat_reply_skip", chain)
+    )
+
+    assert payloads == [{"chatId": "chat_reply_skip", "text": "保留正文"}]
+
+
 def test_build_send_payloads_expands_serialized_nodes_with_video_file_payload(
     monkeypatch,
 ):

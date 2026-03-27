@@ -37,6 +37,7 @@ SEND_LOG_PREFIX = "[agent_wechat][send]"
 SEND_RECOVERY_RETRY_ATTEMPTS = 3
 SEND_RECOVERY_RETRY_INTERVAL_SECONDS = 1.0
 SEND_RECOVERY_ERRORS = {"No action selected"}
+IGNORED_SERIALIZED_SEG_TYPES = {"reply"}
 MAX_FILENAME_LENGTH = 96
 
 
@@ -418,6 +419,8 @@ class AgentWeChatMessageEvent(AstrMessageEvent):
 
             if isinstance(serialized, dict):
                 seg_type = str(serialized.get("type") or "").lower()
+                if seg_type in IGNORED_SERIALIZED_SEG_TYPES:
+                    continue
                 seg_data = serialized.get("data")
                 if isinstance(seg_data, dict) and seg_type in {
                     "video",
