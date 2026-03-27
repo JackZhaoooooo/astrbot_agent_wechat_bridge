@@ -57,6 +57,12 @@ def _install_astrbot_stubs() -> None:
             self.url = url
             self.name = name
 
+    class Video:
+        def __init__(self, file=None, url=None, name=None, **_):
+            self.file = file
+            self.url = url
+            self.name = name
+
     class Node:
         def __init__(self, content=None, **_):
             self.content = list(content or [])
@@ -86,6 +92,7 @@ def _install_astrbot_stubs() -> None:
     components_mod.Nodes = Nodes
     components_mod.Plain = Plain
     components_mod.Record = Record
+    components_mod.Video = Video
     platform_mod.Group = Group
 
     astrbot.api = api_mod
@@ -189,4 +196,63 @@ def test_build_send_payloads_splits_text_before_image(monkeypatch):
                 "mimeType": "image/jpeg",
             },
         },
+    ]
+
+
+def test_build_send_payloads_supports_video_component(monkeypatch):
+    module = _load_event_module()
+    monkeypatch.setattr(
+        module,
+        "_load_binary_from_path",
+        lambda path, timeout=30: (b"vid", "video/mp4", "movie.mp4"),
+    )
+
+    chain = module.MessageChain(
+        [
+            module.Video(file="file:////tmp/movie.mp4"),
+        ]
+    )
+    payloads = asyncio.run(
+        module.AgentWeChatMessageEvent._build_send_payloads("chat_v", chain)
+    )
+    assert payloads == [
+        {
+            "chatId": "chat_v",
+            "file": {
+                "data": "dmlk",
+                "filename": "movie.mp4",
+            },
+        }
+    ]
+
+
+def test_build_send_payloads_supports_serialized_video_component(monkeypatch):
+    module = _load_event_module()
+    monkeypatch.setattr(
+        module,
+        "_load_binary_from_path",
+        lambda path, timeout=30: (b"vid2", "video/mp4", "from-serialized.mp4"),
+    )
+
+    class SerializedVideo:
+        async def to_dict(self):
+            return {
+                "type": "video",
+                "data": {
+                    "file": "file:////tmp/from-serialized.mp4",
+                },
+            }
+
+    chain = module.MessageChain([SerializedVideo()])
+    payloads = asyncio.run(
+        module.AgentWeChatMessageEvent._build_send_payloads("chat_sv", chain)
+    )
+    assert payloads == [
+        {
+            "chatId": "chat_sv",
+            "file": {
+                "data": "dmlkMg==",
+                "filename": "from-serialized.mp4",
+            },
+        }
     ]

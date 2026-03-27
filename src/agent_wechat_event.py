@@ -14,7 +14,16 @@ import requests
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain
-from astrbot.api.message_components import At, File, Image, Node, Nodes, Plain, Record
+from astrbot.api.message_components import (
+    At,
+    File,
+    Image,
+    Node,
+    Nodes,
+    Plain,
+    Record,
+    Video,
+)
 from astrbot.api.platform import Group
 
 from .agent_wechat_client import WeChatClient
@@ -47,7 +56,7 @@ def _describe_component(component: Any) -> str:
     if isinstance(component, Image):
         source = getattr(component, "file", None) or getattr(component, "url", None)
         return f"{comp_type}(source={source})"
-    if isinstance(component, (File, Record)):
+    if isinstance(component, (File, Record, Video)):
         source = getattr(component, "file", None) or getattr(component, "url", None)
         name = getattr(component, "name", None)
         return f"{comp_type}(source={source}, name={name})"
@@ -183,35 +192,93 @@ class AgentWeChatMessageEvent(AstrMessageEvent):
                     continue
 
                 node_text_parts: list[str] = []
+
+                async def flush_node_text() -> None:
+                    node_text = "".join(node_text_parts).strip()
+                    if not node_text:
+                        return
+                    payloads.append({"chatId": chat_id, "text": node_text})
+                    logger.info(
+                        f"{SEND_LOG_PREFIX} append node-text payload "
+                        f"chat={chat_id} index={component_index} node={node_idx} "
+                        f"text_len={len(node_text)}"
+                    )
+                    node_text_parts.clear()
+
                 for seg in content:
                     if not isinstance(seg, dict):
                         continue
                     seg_type = str(seg.get("type") or "").lower()
                     seg_data = seg.get("data")
-                    if seg_type not in {"text", "plain"} or not isinstance(
-                        seg_data, dict
-                    ):
+                    if not isinstance(seg_data, dict):
                         continue
-                    seg_text = str(seg_data.get("text") or "")
-                    if seg_text:
-                        node_text_parts.append(seg_text)
+
+                    if seg_type in {"text", "plain"}:
+                        seg_text = str(seg_data.get("text") or "")
+                        if seg_text:
+                            node_text_parts.append(seg_text)
+                        continue
+
+                    if seg_type == "image":
+                        source = seg_data.get("file") or seg_data.get("url")
+                        if not source:
+                            continue
+                        await flush_node_text()
+                        data, mime_type, _ = await asyncio.to_thread(
+                            _load_binary_from_path, str(source)
+                        )
+                        payloads.append(
+                            {
+                                "chatId": chat_id,
+                                "image": {
+                                    "data": base64.b64encode(data).decode("utf-8"),
+                                    "mimeType": mime_type or "image/png",
+                                },
+                            }
+                        )
+                        expanded += 1
+                        logger.info(
+                            f"{SEND_LOG_PREFIX} append serialized node image payload "
+                            f"chat={chat_id} index={component_index} node={node_idx}"
+                        )
+                        continue
+
+                    if seg_type in {"video", "file", "record", "audio"}:
+                        source = seg_data.get("file") or seg_data.get("url")
+                        if not source:
+                            continue
+                        await flush_node_text()
+                        data, _, filename = await asyncio.to_thread(
+                            _load_binary_from_path, str(source)
+                        )
+                        payloads.append(
+                            {
+                                "chatId": chat_id,
+                                "file": {
+                                    "data": base64.b64encode(data).decode("utf-8"),
+                                    "filename": str(
+                                        seg_data.get("name") or filename or "file"
+                                    ),
+                                },
+                            }
+                        )
+                        expanded += 1
+                        logger.info(
+                            f"{SEND_LOG_PREFIX} append serialized node file payload "
+                            f"chat={chat_id} index={component_index} node={node_idx} "
+                            f"seg_type={seg_type}"
+                        )
+                        continue
 
                 node_text = "".join(node_text_parts).strip()
-                if not node_text:
-                    logger.warning(
-                        f"{SEND_LOG_PREFIX} serialized node has no text segment "
-                        f"chat={chat_id} index={component_index} node={node_idx}"
+                if node_text:
+                    payloads.append({"chatId": chat_id, "text": node_text})
+                    expanded += 1
+                    logger.info(
+                        f"{SEND_LOG_PREFIX} append node-text payload "
+                        f"chat={chat_id} index={component_index} node={node_idx} "
+                        f"text_len={len(node_text)}"
                     )
-                    continue
-
-                payload = {"chatId": chat_id, "text": node_text}
-                payloads.append(payload)
-                expanded += 1
-                logger.info(
-                    f"{SEND_LOG_PREFIX} append node-text payload "
-                    f"chat={chat_id} index={component_index} node={node_idx} "
-                    f"text_len={len(node_text)}"
-                )
 
             if expanded > 0:
                 logger.info(
@@ -316,13 +383,13 @@ class AgentWeChatMessageEvent(AstrMessageEvent):
                 )
                 continue
 
-            if isinstance(component, (File, Record)):
+            if isinstance(component, (File, Record, Video)):
                 source = getattr(component, "file", None) or getattr(
                     component, "url", None
                 )
                 if not source:
                     logger.warning(
-                        f"{SEND_LOG_PREFIX} skip file/record component without source "
+                        f"{SEND_LOG_PREFIX} skip file/record/video component without source "
                         f"chat={chat_id} index={index}"
                     )
                     continue
@@ -361,6 +428,44 @@ class AgentWeChatMessageEvent(AstrMessageEvent):
                 )
                 serialized = await serialized
             if isinstance(serialized, dict):
+                seg_type = str(serialized.get("type") or "").lower()
+                seg_data = serialized.get("data")
+                if isinstance(seg_data, dict) and seg_type in {
+                    "video",
+                    "file",
+                    "record",
+                    "audio",
+                }:
+                    source = seg_data.get("file") or seg_data.get("url")
+                    if source:
+                        text = "".join(text_buffer).strip()
+                        if text:
+                            payloads.append({"chatId": chat_id, "text": text})
+                            logger.info(
+                                f"{SEND_LOG_PREFIX} split text before serialized file "
+                                f"chat={chat_id} index={index} text_len={len(text)}"
+                            )
+                        text_buffer.clear()
+                        data, _, filename = await asyncio.to_thread(
+                            _load_binary_from_path, str(source)
+                        )
+                        payload = {
+                            "chatId": chat_id,
+                            "file": {
+                                "data": base64.b64encode(data).decode("utf-8"),
+                                "filename": str(
+                                    seg_data.get("name") or filename or "file"
+                                ),
+                            },
+                        }
+                        payloads.append(payload)
+                        logger.info(
+                            f"{SEND_LOG_PREFIX} append serialized file payload "
+                            f"chat={chat_id} index={index} seg_type={seg_type} "
+                            f"summary={_summarize_payload(payload)}"
+                        )
+                        continue
+
                 expanded = await expand_serialized_nodes(
                     serialized,
                     component_index=index,
