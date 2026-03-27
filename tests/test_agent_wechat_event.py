@@ -161,3 +161,32 @@ def test_build_send_payloads_expands_serialized_nodes_messages():
         {"chatId": "chat_y", "text": "first"},
         {"chatId": "chat_y", "text": "second"},
     ]
+
+
+def test_build_send_payloads_splits_text_before_image(monkeypatch):
+    module = _load_event_module()
+    monkeypatch.setattr(
+        module,
+        "_load_binary_from_path",
+        lambda path, timeout=30: (b"img", "image/jpeg", "a.jpg"),
+    )
+
+    chain = module.MessageChain(
+        [
+            module.Plain(text="hello"),
+            module.Image(file="/tmp/a.jpg"),
+        ]
+    )
+    payloads = asyncio.run(
+        module.AgentWeChatMessageEvent._build_send_payloads("chat_z", chain)
+    )
+    assert payloads == [
+        {"chatId": "chat_z", "text": "hello"},
+        {
+            "chatId": "chat_z",
+            "image": {
+                "data": "aW1n",
+                "mimeType": "image/jpeg",
+            },
+        },
+    ]

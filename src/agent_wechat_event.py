@@ -21,6 +21,9 @@ from .agent_wechat_client import WeChatClient
 
 SEND_REQUEST_TIMEOUT_SECONDS = 30.0
 SEND_LOG_PREFIX = "[agent_wechat][send]"
+SEND_RECOVERY_RETRY_ATTEMPTS = 3
+SEND_RECOVERY_RETRY_INTERVAL_SECONDS = 1.0
+SEND_RECOVERY_ERRORS = {"No action selected"}
 
 
 def _truncate(value: str, limit: int = 80) -> str:
@@ -300,7 +303,11 @@ class AgentWeChatMessageEvent(AstrMessageEvent):
                 }
                 text = "".join(text_buffer).strip()
                 if text:
-                    payload["text"] = text
+                    payloads.append({"chatId": chat_id, "text": text})
+                    logger.info(
+                        f"{SEND_LOG_PREFIX} split text before image "
+                        f"chat={chat_id} index={index} text_len={len(text)}"
+                    )
                 text_buffer.clear()
                 payloads.append(payload)
                 logger.info(
@@ -333,7 +340,11 @@ class AgentWeChatMessageEvent(AstrMessageEvent):
                 }
                 text = "".join(text_buffer).strip()
                 if text:
-                    payload["text"] = text
+                    payloads.append({"chatId": chat_id, "text": text})
+                    logger.info(
+                        f"{SEND_LOG_PREFIX} split text before file "
+                        f"chat={chat_id} index={index} text_len={len(text)}"
+                    )
                 text_buffer.clear()
                 payloads.append(payload)
                 logger.info(
@@ -393,42 +404,74 @@ class AgentWeChatMessageEvent(AstrMessageEvent):
 
         for idx, payload in enumerate(payloads):
             payload_summary = _summarize_payload(payload)
-            logger.info(
-                f"{SEND_LOG_PREFIX} send payload start "
-                f"chat={chat_id} idx={idx + 1}/{len(payloads)} summary={payload_summary}"
-            )
-            try:
-                result = await asyncio.to_thread(
-                    client.send_message,
-                    payload,
-                    timeout=SEND_REQUEST_TIMEOUT_SECONDS,
+            recovered = False
+            for attempt in range(1, SEND_RECOVERY_RETRY_ATTEMPTS + 1):
+                logger.info(
+                    f"{SEND_LOG_PREFIX} send payload start "
+                    f"chat={chat_id} idx={idx + 1}/{len(payloads)} "
+                    f"attempt={attempt}/{SEND_RECOVERY_RETRY_ATTEMPTS} "
+                    f"summary={payload_summary}"
                 )
-            except requests.exceptions.ReadTimeout as exc:
-                logger.exception(
-                    f"{SEND_LOG_PREFIX} send payload timeout "
-                    f"chat={chat_id} idx={idx + 1}/{len(payloads)} summary={payload_summary}"
-                )
-                raise RuntimeError(
-                    "agent-wechat 发送超时（30秒未响应），"
-                    "请检查微信客户端是否卡在聊天切换/自动化操作中。"
-                ) from exc
-            except requests.exceptions.RequestException as exc:
-                logger.exception(
-                    f"{SEND_LOG_PREFIX} send payload request error "
-                    f"chat={chat_id} idx={idx + 1}/{len(payloads)} summary={payload_summary}"
-                )
-                raise RuntimeError(f"agent-wechat 发送请求失败: {exc}") from exc
-            if not result.get("success", True):
+                try:
+                    result = await asyncio.to_thread(
+                        client.send_message,
+                        payload,
+                        timeout=SEND_REQUEST_TIMEOUT_SECONDS,
+                    )
+                except requests.exceptions.ReadTimeout as exc:
+                    logger.exception(
+                        f"{SEND_LOG_PREFIX} send payload timeout "
+                        f"chat={chat_id} idx={idx + 1}/{len(payloads)} summary={payload_summary}"
+                    )
+                    raise RuntimeError(
+                        "agent-wechat 发送超时（30秒未响应），"
+                        "请检查微信客户端是否卡在聊天切换/自动化操作中。"
+                    ) from exc
+                except requests.exceptions.RequestException as exc:
+                    logger.exception(
+                        f"{SEND_LOG_PREFIX} send payload request error "
+                        f"chat={chat_id} idx={idx + 1}/{len(payloads)} summary={payload_summary}"
+                    )
+                    raise RuntimeError(f"agent-wechat 发送请求失败: {exc}") from exc
+
+                if result.get("success", True):
+                    logger.info(
+                        f"{SEND_LOG_PREFIX} send payload ok "
+                        f"chat={chat_id} idx={idx + 1}/{len(payloads)} "
+                        f"attempt={attempt}/{SEND_RECOVERY_RETRY_ATTEMPTS} "
+                        f"result_keys={sorted(result.keys())}"
+                    )
+                    recovered = True
+                    break
+
+                error = str(result.get("error") or "")
+                recoverable = error in SEND_RECOVERY_ERRORS
+                if recoverable and attempt < SEND_RECOVERY_RETRY_ATTEMPTS:
+                    logger.warning(
+                        f"{SEND_LOG_PREFIX} recoverable send error "
+                        f"chat={chat_id} idx={idx + 1}/{len(payloads)} "
+                        f"attempt={attempt}/{SEND_RECOVERY_RETRY_ATTEMPTS} "
+                        f"error={error}; trying open_chat and retry"
+                    )
+                    try:
+                        await asyncio.to_thread(client.open_chat, chat_id, False)
+                    except Exception as exc:
+                        logger.warning(
+                            f"{SEND_LOG_PREFIX} open_chat before retry failed "
+                            f"chat={chat_id} idx={idx + 1}/{len(payloads)} error={exc}"
+                        )
+                    await asyncio.sleep(SEND_RECOVERY_RETRY_INTERVAL_SECONDS)
+                    continue
+
                 logger.error(
                     f"{SEND_LOG_PREFIX} send payload failed "
                     f"chat={chat_id} idx={idx + 1}/{len(payloads)} summary={payload_summary} "
-                    f"error={result.get('error')}"
+                    f"error={error}"
                 )
-                raise RuntimeError(result.get("error") or "agent-wechat 发送失败")
-            logger.info(
-                f"{SEND_LOG_PREFIX} send payload ok "
-                f"chat={chat_id} idx={idx + 1}/{len(payloads)} result_keys={sorted(result.keys())}"
-            )
+                raise RuntimeError(error or "agent-wechat 发送失败")
+
+            if not recovered:
+                raise RuntimeError("agent-wechat 发送失败：重试后仍失败")
         logger.info(
             f"{SEND_LOG_PREFIX} send chain done chat={chat_id} payload_count={len(payloads)}"
         )
