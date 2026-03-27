@@ -152,17 +152,66 @@ def _basename_from_url(url: str, default: str = "file") -> str:
     return name or default
 
 
-def _load_binary_from_path(path: str, timeout: int = 30) -> tuple[bytes, str, str]:
+def _extract_segment_source(seg_data: dict[str, Any]) -> str | None:
+    for key in ("file", "url", "path", "src", "local_path", "temp_file"):
+        value = seg_data.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        if isinstance(value, dict):
+            for nested_key in ("file", "url", "path", "src"):
+                nested = value.get(nested_key)
+                if isinstance(nested, str) and nested.strip():
+                    return nested.strip()
+    return None
+
+
+def _extract_segment_filename(seg_data: dict[str, Any], fallback: str = "file") -> str:
+    for key in ("name", "filename", "file_name", "title"):
+        value = seg_data.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return fallback
+
+
+async def _segment_to_dict(seg: Any) -> dict[str, Any] | None:
+    if isinstance(seg, dict):
+        return seg
+    if not hasattr(seg, "to_dict"):
+        return None
+    serialized = seg.to_dict()
+    if inspect.isawaitable(serialized):
+        serialized = await serialized
+    if isinstance(serialized, dict):
+        return serialized
+    return None
+
+
+def _load_binary_from_path(
+    path: str,
+    timeout: int = 30,
+    fallback_mime: str = "application/octet-stream",
+) -> tuple[bytes, str, str]:
+    if path.startswith("base64://"):
+        encoded = path.split("://", 1)[1].lstrip("/")
+        data = base64.b64decode(encoded)
+        return data, fallback_mime, "inline.bin"
+
     if path.startswith(("http://", "https://")):
         response = requests.get(path, timeout=timeout)
         response.raise_for_status()
-        mime_type = response.headers.get("Content-Type") or _guess_mime_type(path)
+        mime_type = response.headers.get("Content-Type") or _guess_mime_type(
+            path, fallback_mime
+        )
         return response.content, mime_type, _basename_from_url(path)
 
     normalized = path[8:] if path.startswith("file:///") else path
     with open(normalized, "rb") as handle:
         data = handle.read()
-    return data, _guess_mime_type(normalized), os.path.basename(normalized)
+    return (
+        data,
+        _guess_mime_type(normalized, fallback_mime),
+        os.path.basename(normalized),
+    )
 
 
 class AgentWeChatMessageEvent(AstrMessageEvent):
@@ -331,7 +380,8 @@ class AgentWeChatMessageEvent(AstrMessageEvent):
                         )
                     node_text_parts.clear()
 
-                for seg in content:
+                for seg_raw in content:
+                    seg = await _segment_to_dict(seg_raw)
                     if not isinstance(seg, dict):
                         continue
                     seg_type = str(seg.get("type") or "").lower()
@@ -346,12 +396,20 @@ class AgentWeChatMessageEvent(AstrMessageEvent):
                         continue
 
                     if seg_type == "image":
-                        source = seg_data.get("file") or seg_data.get("url")
+                        source = _extract_segment_source(seg_data)
                         if not source:
+                            logger.warning(
+                                f"{SEND_LOG_PREFIX} skip serialized node image without source "
+                                f"chat={chat_id} index={component_index} node={node_idx} "
+                                f"seg_data_keys={sorted(seg_data.keys())}"
+                            )
                             continue
                         await flush_node_text()
                         data, mime_type, _ = await asyncio.to_thread(
-                            _load_binary_from_path, str(source)
+                            _load_binary_from_path,
+                            str(source),
+                            30,
+                            "image/png",
                         )
                         payloads.append(
                             {
@@ -365,13 +423,19 @@ class AgentWeChatMessageEvent(AstrMessageEvent):
                         expanded += 1
                         logger.info(
                             f"{SEND_LOG_PREFIX} append serialized node image payload "
-                            f"chat={chat_id} index={component_index} node={node_idx}"
+                            f"chat={chat_id} index={component_index} node={node_idx} "
+                            f"source={_truncate(str(source), 120)}"
                         )
                         continue
 
                     if seg_type in {"video", "file", "record", "audio"}:
-                        source = seg_data.get("file") or seg_data.get("url")
+                        source = _extract_segment_source(seg_data)
                         if not source:
+                            logger.warning(
+                                f"{SEND_LOG_PREFIX} skip serialized node file without source "
+                                f"chat={chat_id} index={component_index} node={node_idx} "
+                                f"seg_type={seg_type} seg_data_keys={sorted(seg_data.keys())}"
+                            )
                             continue
                         await flush_node_text()
                         data, _, filename = await asyncio.to_thread(
@@ -382,8 +446,8 @@ class AgentWeChatMessageEvent(AstrMessageEvent):
                                 "chatId": chat_id,
                                 "file": {
                                     "data": base64.b64encode(data).decode("utf-8"),
-                                    "filename": str(
-                                        seg_data.get("name") or filename or "file"
+                                    "filename": _extract_segment_filename(
+                                        seg_data, fallback=str(filename or "file")
                                     ),
                                 },
                             }
@@ -392,7 +456,7 @@ class AgentWeChatMessageEvent(AstrMessageEvent):
                         logger.info(
                             f"{SEND_LOG_PREFIX} append serialized node file payload "
                             f"chat={chat_id} index={component_index} node={node_idx} "
-                            f"seg_type={seg_type}"
+                            f"seg_type={seg_type} source={_truncate(str(source), 120)}"
                         )
                         continue
 
@@ -519,7 +583,7 @@ class AgentWeChatMessageEvent(AstrMessageEvent):
                     )
                     continue
                 data, mime_type, _ = await asyncio.to_thread(
-                    _load_binary_from_path, source
+                    _load_binary_from_path, source, 30, "image/png"
                 )
                 payload: dict[str, Any] = {
                     "chatId": chat_id,
@@ -618,7 +682,7 @@ class AgentWeChatMessageEvent(AstrMessageEvent):
                     "record",
                     "audio",
                 }:
-                    source = seg_data.get("file") or seg_data.get("url")
+                    source = _extract_segment_source(seg_data)
                     if source:
                         text = "".join(text_buffer).strip()
                         if text:
@@ -635,8 +699,8 @@ class AgentWeChatMessageEvent(AstrMessageEvent):
                             "chatId": chat_id,
                             "file": {
                                 "data": base64.b64encode(data).decode("utf-8"),
-                                "filename": str(
-                                    seg_data.get("name") or filename or "file"
+                                "filename": _extract_segment_filename(
+                                    seg_data, fallback=str(filename or "file")
                                 ),
                             },
                         }

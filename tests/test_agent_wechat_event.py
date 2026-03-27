@@ -140,7 +140,11 @@ def test_build_send_payloads_merges_nodes_and_keeps_video_file_payload(monkeypat
     monkeypatch.setattr(
         module,
         "_load_binary_from_path",
-        lambda path, timeout=30: (b"node-vid", "video/mp4", "node-video.mp4"),
+        lambda path, timeout=30, fallback_mime="application/octet-stream": (
+            b"node-vid",
+            "video/mp4",
+            "node-video.mp4",
+        ),
     )
     chain = module.MessageChain(
         [
@@ -255,7 +259,11 @@ def test_build_send_payloads_merges_serialized_nodes_with_video_file_payload(mon
     monkeypatch.setattr(
         module,
         "_load_binary_from_path",
-        lambda path, timeout=30: (b"node-video", "video/mp4", "node.mp4"),
+        lambda path, timeout=30, fallback_mime="application/octet-stream": (
+            b"node-video",
+            "video/mp4",
+            "node.mp4",
+        ),
     )
 
     class SerializedNodesWithVideo:
@@ -298,12 +306,105 @@ def test_build_send_payloads_merges_serialized_nodes_with_video_file_payload(mon
     ]
 
 
+def test_build_send_payloads_merges_serialized_nodes_with_base64_image_payload():
+    module = _load_event_module()
+
+    class SerializedNodesWithBase64Image:
+        async def to_dict(self):
+            return {
+                "messages": [
+                    {
+                        "type": "node",
+                        "data": {
+                            "nickname": "alice",
+                            "content": [
+                                {"type": "text", "data": {"text": "wow"}},
+                                {"type": "image", "data": {"file": "base64:///aW1n"}},
+                            ],
+                        },
+                    }
+                ]
+            }
+
+    chain = module.MessageChain([SerializedNodesWithBase64Image()])
+    payloads = asyncio.run(
+        module.AgentWeChatMessageEvent._build_send_payloads("chat_img64", chain)
+    )
+    assert payloads == [
+        {
+            "chatId": "chat_img64",
+            "text": "Merged message (1 items):\nalice: wow [image]",
+        },
+        {
+            "chatId": "chat_img64",
+            "image": {
+                "data": "aW1n",
+                "mimeType": "image/png",
+            },
+        },
+    ]
+
+
+def test_build_send_payloads_merges_serialized_nodes_with_path_video_payload(monkeypatch):
+    module = _load_event_module()
+    monkeypatch.setattr(
+        module,
+        "_load_binary_from_path",
+        lambda path, timeout=30, fallback_mime="application/octet-stream": (
+            b"vid-path",
+            "video/mp4",
+            "path-video.mp4",
+        ),
+    )
+
+    class SerializedNodesWithPathVideo:
+        async def to_dict(self):
+            return {
+                "messages": [
+                    {
+                        "type": "node",
+                        "data": {
+                            "nickname": "alice",
+                            "content": [
+                                {
+                                    "type": "video",
+                                    "data": {"path": "/tmp/path-video.mp4"},
+                                },
+                            ],
+                        },
+                    }
+                ]
+            }
+
+    chain = module.MessageChain([SerializedNodesWithPathVideo()])
+    payloads = asyncio.run(
+        module.AgentWeChatMessageEvent._build_send_payloads("chat_path_video", chain)
+    )
+    assert payloads == [
+        {
+            "chatId": "chat_path_video",
+            "text": "Merged message (1 items):\nalice: [video]",
+        },
+        {
+            "chatId": "chat_path_video",
+            "file": {
+                "data": "dmlkLXBhdGg=",
+                "filename": "path-video.mp4",
+            },
+        },
+    ]
+
+
 def test_build_send_payloads_splits_text_before_image(monkeypatch):
     module = _load_event_module()
     monkeypatch.setattr(
         module,
         "_load_binary_from_path",
-        lambda path, timeout=30: (b"img", "image/jpeg", "a.jpg"),
+        lambda path, timeout=30, fallback_mime="application/octet-stream": (
+            b"img",
+            "image/jpeg",
+            "a.jpg",
+        ),
     )
 
     chain = module.MessageChain(
@@ -332,7 +433,11 @@ def test_build_send_payloads_supports_video_component(monkeypatch):
     monkeypatch.setattr(
         module,
         "_load_binary_from_path",
-        lambda path, timeout=30: (b"vid", "video/mp4", "movie.mp4"),
+        lambda path, timeout=30, fallback_mime="application/octet-stream": (
+            b"vid",
+            "video/mp4",
+            "movie.mp4",
+        ),
     )
 
     chain = module.MessageChain(
@@ -359,7 +464,11 @@ def test_build_send_payloads_supports_serialized_video_component(monkeypatch):
     monkeypatch.setattr(
         module,
         "_load_binary_from_path",
-        lambda path, timeout=30: (b"vid2", "video/mp4", "from-serialized.mp4"),
+        lambda path, timeout=30, fallback_mime="application/octet-stream": (
+            b"vid2",
+            "video/mp4",
+            "from-serialized.mp4",
+        ),
     )
 
     class SerializedVideo:
