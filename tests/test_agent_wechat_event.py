@@ -168,7 +168,7 @@ def test_build_send_payloads_merges_nodes_and_keeps_video_file_payload(monkeypat
     assert payloads == [
         {
             "chatId": "chat_node_video",
-            "text": "Merged message (1 items):\nhello [video]",
+            "text": "Merged message (1 items):\nhello",
         },
         {
             "chatId": "chat_node_video",
@@ -296,7 +296,7 @@ def test_build_send_payloads_merges_serialized_nodes_with_video_file_payload(
     assert payloads == [
         {
             "chatId": "chat_y2",
-            "text": "Merged message (1 items):\nalice: hello [video]",
+            "text": "Merged message (1 items):\nalice: hello",
         },
         {
             "chatId": "chat_y2",
@@ -335,7 +335,7 @@ def test_build_send_payloads_merges_serialized_nodes_with_base64_image_payload()
     assert payloads == [
         {
             "chatId": "chat_img64",
-            "text": "Merged message (1 items):\nalice: wow [image]",
+            "text": "Merged message (1 items):\nalice: wow",
         },
         {
             "chatId": "chat_img64",
@@ -387,7 +387,7 @@ def test_build_send_payloads_merges_serialized_nodes_with_path_video_payload(
     assert payloads == [
         {
             "chatId": "chat_path_video",
-            "text": "Merged message (1 items):\nalice: [video]",
+            "text": "Merged message (media only: 1 items)",
         },
         {
             "chatId": "chat_path_video",
@@ -442,7 +442,7 @@ def test_build_send_payloads_merges_serialized_nodes_sanitizes_video_filename(
     assert payloads == [
         {
             "chatId": "chat_video_name",
-            "text": "Merged message (1 items):\nalice: [video]",
+            "text": "Merged message (media only: 1 items)",
         },
         {
             "chatId": "chat_video_name",

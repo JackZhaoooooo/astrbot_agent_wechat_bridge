@@ -137,6 +137,40 @@ def _segment_dict_to_merge_text(segment: dict[str, Any]) -> str:
     return f"[{seg_type or 'segment'}]"
 
 
+def _component_to_summary_text(component: Any) -> str:
+    if isinstance(component, Plain):
+        return str(getattr(component, "text", "") or "")
+    if isinstance(component, At):
+        name = (
+            getattr(component, "name", None) or getattr(component, "qq", None) or "user"
+        )
+        return f"@{name}"
+    return ""
+
+
+def _segment_dict_to_summary_text(segment: dict[str, Any]) -> str:
+    seg_type = str(segment.get("type") or "").lower()
+    seg_data = segment.get("data")
+    if not isinstance(seg_data, dict):
+        return ""
+    if seg_type in {"text", "plain"}:
+        return str(seg_data.get("text") or "")
+    if seg_type == "at":
+        target = (
+            seg_data.get("name") or seg_data.get("qq") or seg_data.get("id") or "user"
+        )
+        return f"@{target}"
+    return ""
+
+
+def _component_media_marker(component: Any) -> bool:
+    return isinstance(component, (Image, Video, Record, File))
+
+
+def _segment_media_marker(seg_type: str) -> bool:
+    return seg_type in {"image", "video", "record", "audio", "voice", "file"}
+
+
 def _normalize_merged_text(value: str) -> str:
     text = ZERO_WIDTH_RE.sub("", value or "")
     lines = [line.strip() for line in text.replace("\r\n", "\n").split("\n")]
@@ -321,34 +355,42 @@ class AgentWeChatMessageEvent(AstrMessageEvent):
                 else [component]
             )
             lines: list[str] = []
+            media_only_count = 0
             for node_item in node_items:
                 node_content = list(getattr(node_item, "content", []) or [])
                 if not node_content:
                     continue
                 sender = str(getattr(node_item, "name", "") or "").strip()
                 parts = [
-                    _normalize_merged_text(_component_to_merge_text(item)).strip()
+                    _normalize_merged_text(_component_to_summary_text(item)).strip()
                     for item in node_content
                 ]
                 parts = [part for part in parts if part]
                 if not parts:
+                    if any(_component_media_marker(item) for item in node_content):
+                        media_only_count += 1
                     continue
                 body = _normalize_merged_text(" ".join(parts))
                 if not body:
+                    if any(_component_media_marker(item) for item in node_content):
+                        media_only_count += 1
                     continue
                 if sender:
                     lines.append(f"{sender}: {body}")
                 else:
                     lines.append(body)
-            if not lines:
+            if not lines and media_only_count <= 0:
                 return ""
-            return f"Merged message ({len(lines)} items):\n" + "\n".join(lines)
+            if lines:
+                return f"Merged message ({len(lines)} items):\n" + "\n".join(lines)
+            return f"Merged message (media only: {media_only_count} items)"
 
         def merge_serialized_nodes_text(serialized: dict[str, Any]) -> str:
             messages = serialized.get("messages")
             if not isinstance(messages, list):
                 return ""
             lines: list[str] = []
+            media_only_count = 0
             for node_item in messages:
                 if not isinstance(node_item, dict):
                     continue
@@ -365,23 +407,37 @@ class AgentWeChatMessageEvent(AstrMessageEvent):
                 if not isinstance(content, list):
                     continue
                 parts = [
-                    _normalize_merged_text(_segment_dict_to_merge_text(seg)).strip()
+                    _normalize_merged_text(_segment_dict_to_summary_text(seg)).strip()
                     for seg in content
                     if isinstance(seg, dict)
                 ]
                 parts = [part for part in parts if part]
                 if not parts:
+                    if any(
+                        _segment_media_marker(str(seg.get("type") or "").lower())
+                        for seg in content
+                        if isinstance(seg, dict)
+                    ):
+                        media_only_count += 1
                     continue
                 body = _normalize_merged_text(" ".join(parts))
                 if not body:
+                    if any(
+                        _segment_media_marker(str(seg.get("type") or "").lower())
+                        for seg in content
+                        if isinstance(seg, dict)
+                    ):
+                        media_only_count += 1
                     continue
                 if sender:
                     lines.append(f"{sender}: {body}")
                 else:
                     lines.append(body)
-            if not lines:
+            if not lines and media_only_count <= 0:
                 return ""
-            return f"Merged message ({len(lines)} items):\n" + "\n".join(lines)
+            if lines:
+                return f"Merged message ({len(lines)} items):\n" + "\n".join(lines)
+            return f"Merged message (media only: {media_only_count} items)"
 
         async def expand_serialized_nodes(
             serialized: dict[str, Any],
