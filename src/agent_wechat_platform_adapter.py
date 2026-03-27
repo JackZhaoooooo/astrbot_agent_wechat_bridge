@@ -47,6 +47,7 @@ MEDIA_TYPES = {MSG_TYPE_IMAGE, MSG_TYPE_VOICE, MSG_TYPE_VIDEO, MSG_TYPE_APP}
 POLL_INTERVAL_MS = 200
 FULL_SYNC_INTERVAL_MS = 1200
 AUTH_POLL_INTERVAL_MS = 30000
+LOGIN_PAGE_WARN_INTERVAL_SECONDS = 60.0
 HOT_PATH_TIMEOUT_SECONDS = 0.8
 FAST_PROBE_LIMIT = 1
 FAST_PROBE_FETCH_LIMIT = 1
@@ -148,6 +149,7 @@ class AgentWeChatPlatformAdapter(Platform):
         self.last_seen_id: dict[str, int] = {}
         self.last_auth_check = 0.0
         self.last_auth_status: str | None = None
+        self.last_login_page_warn_at = 0.0
         self.self_id = "agent_wechat"
         self.self_aliases: set[str] = set()
         self._add_self_alias(self.self_id)
@@ -218,6 +220,16 @@ class AgentWeChatPlatformAdapter(Platform):
         self.active_chat_ids.insert(0, chat_id)
         if len(self.active_chat_ids) > ACTIVE_CHAT_KEEP:
             del self.active_chat_ids[ACTIVE_CHAT_KEEP:]
+
+    def _warn_login_page_throttled(self) -> None:
+        now = time.monotonic()
+        if now - self.last_login_page_warn_at < LOGIN_PAGE_WARN_INTERVAL_SECONDS:
+            return
+        self.last_login_page_warn_at = now
+        logger.warning(
+            "[agent_wechat] 微信疑似已掉回登录页（auth=logged_out），"
+            "请打开 noVNC 完成重新登录；该提示每60秒提醒一次"
+        )
 
     def _seed_active_chats(self, chats: list[dict[str, Any]]) -> None:
         for chat in chats[:ACTIVE_CHAT_SEED]:
@@ -544,7 +556,11 @@ class AgentWeChatPlatformAdapter(Platform):
             self._add_self_alias(self.self_id)
 
         if self.last_auth_status != "logged_in":
+            if self.last_auth_status == "logged_out":
+                self._warn_login_page_throttled()
             return False
+
+        self.last_login_page_warn_at = 0.0
         return True
 
     async def _process_chat(
