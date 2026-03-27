@@ -278,23 +278,12 @@ class AgentWeChatPlatformAdapter(Platform):
         session: MessageSesion,
         message_chain,
     ) -> None:
-        component_types = [
-            type(comp).__name__ for comp in getattr(message_chain, "chain", [])
-        ]
-        logger.info(
-            "[agent_wechat][send] send_by_session start "
-            f"session={session.session_id} type={session.message_type.value} "
-            f"components={len(getattr(message_chain, 'chain', []))} types={component_types}"
-        )
         await AgentWeChatMessageEvent.send_message_chain(
             self.client,
             session.session_id,
             message_chain,
         )
         self._touch_chat(str(session.session_id))
-        logger.info(
-            f"[agent_wechat][send] send_by_session done session={session.session_id}"
-        )
         await super().send_by_session(session, message_chain)
 
     async def run(self) -> None:
@@ -965,10 +954,6 @@ class AgentWeChatPlatformAdapter(Platform):
     async def handle_msg(self, message: AstrBotMessage) -> None:
         is_group = getattr(message, "type", None) == MessageType.GROUP_MESSAGE
         chat_id = getattr(message, "group_id", None) if is_group else message.session_id
-        logger.info(
-            "[agent_wechat][send] create event "
-            f"session={message.session_id} chat={chat_id} is_group={bool(is_group)}"
-        )
         event = AgentWeChatMessageEvent(
             message_str=message.message_str,
             message_obj=message,

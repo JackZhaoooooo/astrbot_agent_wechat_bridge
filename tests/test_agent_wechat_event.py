@@ -110,7 +110,7 @@ def _load_event_module():
     return importlib.import_module("src.agent_wechat_event")
 
 
-def test_build_send_payloads_merges_nodes_to_single_text():
+def test_build_send_payloads_expands_nodes_in_original_order():
     module = _load_event_module()
     chain = module.MessageChain(
         [
@@ -128,14 +128,12 @@ def test_build_send_payloads_merges_nodes_to_single_text():
     )
 
     assert payloads == [
-        {
-            "chatId": "chat_x",
-            "text": "Merged message (2 items):\none\ntwo",
-        }
+        {"chatId": "chat_x", "text": "one"},
+        {"chatId": "chat_x", "text": "two"},
     ]
 
 
-def test_build_send_payloads_merges_nodes_and_keeps_video_file_payload(monkeypatch):
+def test_build_send_payloads_expands_nodes_and_keeps_video_file_payload(monkeypatch):
     module = _load_event_module()
     monkeypatch.setattr(
         module,
@@ -168,7 +166,7 @@ def test_build_send_payloads_merges_nodes_and_keeps_video_file_payload(monkeypat
     assert payloads == [
         {
             "chatId": "chat_node_video",
-            "text": "Merged message (1 items):\nhello",
+            "text": "From @AI测试群:\n\u200bhello",
         },
         {
             "chatId": "chat_node_video",
@@ -180,7 +178,7 @@ def test_build_send_payloads_merges_nodes_and_keeps_video_file_payload(monkeypat
     ]
 
 
-def test_build_send_payloads_merges_serialized_nodes_messages():
+def test_build_send_payloads_expands_serialized_nodes_messages():
     module = _load_event_module()
 
     class SerializedNodes:
@@ -212,14 +210,12 @@ def test_build_send_payloads_merges_serialized_nodes_messages():
     )
 
     assert payloads == [
-        {
-            "chatId": "chat_y",
-            "text": "Merged message (2 items):\nfirst\nsecond",
-        }
+        {"chatId": "chat_y", "text": "first"},
+        {"chatId": "chat_y", "text": "second"},
     ]
 
 
-def test_build_send_payloads_merges_serialized_nodes_strips_forward_header():
+def test_build_send_payloads_serialized_nodes_preserve_original_text():
     module = _load_event_module()
 
     class SerializedNodesForwardText:
@@ -249,12 +245,12 @@ def test_build_send_payloads_merges_serialized_nodes_strips_forward_header():
     assert payloads == [
         {
             "chatId": "chat_header",
-            "text": "Merged message (1 items):\nalice: 😭",
+            "text": "From @AI测试群:\n\u200b😭",
         }
     ]
 
 
-def test_build_send_payloads_merges_serialized_nodes_with_video_file_payload(
+def test_build_send_payloads_expands_serialized_nodes_with_video_file_payload(
     monkeypatch,
 ):
     module = _load_event_module()
@@ -294,10 +290,7 @@ def test_build_send_payloads_merges_serialized_nodes_with_video_file_payload(
     )
 
     assert payloads == [
-        {
-            "chatId": "chat_y2",
-            "text": "Merged message (1 items):\nalice: hello",
-        },
+        {"chatId": "chat_y2", "text": "hello"},
         {
             "chatId": "chat_y2",
             "file": {
@@ -308,7 +301,7 @@ def test_build_send_payloads_merges_serialized_nodes_with_video_file_payload(
     ]
 
 
-def test_build_send_payloads_merges_serialized_nodes_with_base64_image_payload():
+def test_build_send_payloads_expands_serialized_nodes_with_base64_image_payload():
     module = _load_event_module()
 
     class SerializedNodesWithBase64Image:
@@ -333,10 +326,7 @@ def test_build_send_payloads_merges_serialized_nodes_with_base64_image_payload()
         module.AgentWeChatMessageEvent._build_send_payloads("chat_img64", chain)
     )
     assert payloads == [
-        {
-            "chatId": "chat_img64",
-            "text": "Merged message (1 items):\nalice: wow",
-        },
+        {"chatId": "chat_img64", "text": "wow"},
         {
             "chatId": "chat_img64",
             "image": {
@@ -347,7 +337,7 @@ def test_build_send_payloads_merges_serialized_nodes_with_base64_image_payload()
     ]
 
 
-def test_build_send_payloads_merges_serialized_nodes_with_path_video_payload(
+def test_build_send_payloads_expands_serialized_nodes_with_path_video_payload(
     monkeypatch,
 ):
     module = _load_event_module()
@@ -387,19 +377,15 @@ def test_build_send_payloads_merges_serialized_nodes_with_path_video_payload(
     assert payloads == [
         {
             "chatId": "chat_path_video",
-            "text": "Merged message (media only: 1 items)",
-        },
-        {
-            "chatId": "chat_path_video",
             "file": {
                 "data": "dmlkLXBhdGg=",
                 "filename": "path-video.mp4",
             },
-        },
+        }
     ]
 
 
-def test_build_send_payloads_merges_serialized_nodes_sanitizes_video_filename(
+def test_build_send_payloads_expands_serialized_nodes_sanitizes_video_filename(
     monkeypatch,
 ):
     module = _load_event_module()
@@ -442,15 +428,11 @@ def test_build_send_payloads_merges_serialized_nodes_sanitizes_video_filename(
     assert payloads == [
         {
             "chatId": "chat_video_name",
-            "text": "Merged message (media only: 1 items)",
-        },
-        {
-            "chatId": "chat_video_name",
             "file": {
                 "data": "dmlkLW5hbWU=",
                 "filename": "30283138776.mp4",
             },
-        },
+        }
     ]
 
 
