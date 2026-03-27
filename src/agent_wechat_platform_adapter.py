@@ -27,13 +27,16 @@ from astrbot.api.platform import (
 from astrbot.core.platform.astr_message_event import MessageSesion
 
 from .agent_wechat_access import (
-    is_leading_self_mention,
     is_group_chat,
+    is_leading_self_mention,
     is_official_account,
     strip_leading_mentions,
 )
-from .agent_wechat_client import AgentWeChatAPIError, WeChatClient
-from .agent_wechat_client import WeChatEventWebSocketClient
+from .agent_wechat_client import (
+    AgentWeChatAPIError,
+    WeChatClient,
+    WeChatEventWebSocketClient,
+)
 from .agent_wechat_event import AgentWeChatMessageEvent
 
 MSG_TYPE_TEXT = 1
@@ -275,12 +278,23 @@ class AgentWeChatPlatformAdapter(Platform):
         session: MessageSesion,
         message_chain,
     ) -> None:
+        component_types = [
+            type(comp).__name__ for comp in getattr(message_chain, "chain", [])
+        ]
+        logger.info(
+            "[agent_wechat][send] send_by_session start "
+            f"session={session.session_id} type={session.message_type.value} "
+            f"components={len(getattr(message_chain, 'chain', []))} types={component_types}"
+        )
         await AgentWeChatMessageEvent.send_message_chain(
             self.client,
             session.session_id,
             message_chain,
         )
         self._touch_chat(str(session.session_id))
+        logger.info(
+            f"[agent_wechat][send] send_by_session done session={session.session_id}"
+        )
         await super().send_by_session(session, message_chain)
 
     async def run(self) -> None:
@@ -310,7 +324,10 @@ class AgentWeChatPlatformAdapter(Platform):
                     await self._fast_probe_hot_chats()
 
                     now_ms = time.time() * 1000
-                    if event_triggered or (now_ms - self.last_full_sync_ms) >= FULL_SYNC_INTERVAL_MS:
+                    if (
+                        event_triggered
+                        or (now_ms - self.last_full_sync_ms) >= FULL_SYNC_INTERVAL_MS
+                    ):
                         await self._sync_once(skip_auth_check=True)
                         self.last_full_sync_ms = now_ms
                 except Exception as exc:
@@ -379,10 +396,7 @@ class AgentWeChatPlatformAdapter(Platform):
             return
 
         event_type = str(
-            payload.get("type")
-            or payload.get("event")
-            or payload.get("kind")
-            or ""
+            payload.get("type") or payload.get("event") or payload.get("kind") or ""
         )
 
         if event_type in {"ping", "pong"}:
@@ -393,13 +407,22 @@ class AgentWeChatPlatformAdapter(Platform):
             self.sync_event.set()
             return
 
-        if event_type in {"message", "message_received", "message_created", "wechat_message"}:
+        if event_type in {
+            "message",
+            "message_received",
+            "message_created",
+            "wechat_message",
+        }:
             chat = payload.get("chat")
             message = payload.get("message")
             if isinstance(chat, dict) and isinstance(message, dict):
                 chat_id = str(chat.get("username") or chat.get("id") or "")
                 local_id = int(message.get("localId", 0) or 0)
-                if chat_id and local_id and local_id <= self.last_seen_id.get(chat_id, 0):
+                if (
+                    chat_id
+                    and local_id
+                    and local_id <= self.last_seen_id.get(chat_id, 0)
+                ):
                     return
                 converted = await self._convert_message(chat, message)
                 if converted is not None:
@@ -411,7 +434,9 @@ class AgentWeChatPlatformAdapter(Platform):
                     )
                     await self.handle_msg(converted)
                     if chat_id and local_id:
-                        self.last_seen_id[chat_id] = max(self.last_seen_id.get(chat_id, 0), local_id)
+                        self.last_seen_id[chat_id] = max(
+                            self.last_seen_id.get(chat_id, 0), local_id
+                        )
                         self._touch_chat(chat_id)
                 return
 
@@ -485,8 +510,7 @@ class AgentWeChatPlatformAdapter(Platform):
                 processed_chat_ids.add(chat_id)
 
         unread_ids = {
-            str(chat.get("username") or chat.get("id") or "")
-            for chat in unread_chats
+            str(chat.get("username") or chat.get("id") or "") for chat in unread_chats
         }
         catchup_chats: list[dict[str, Any]] = []
         for chat in chats:
@@ -674,7 +698,9 @@ class AgentWeChatPlatformAdapter(Platform):
                 except asyncio.TimeoutError:
                     return False
                 except Exception as exc:
-                    logger.warning(f"[agent_wechat] failed to open chat {chat_id}: {exc}")
+                    logger.warning(
+                        f"[agent_wechat] failed to open chat {chat_id}: {exc}"
+                    )
                     return False
 
             selection_chat = chat
@@ -699,7 +725,9 @@ class AgentWeChatPlatformAdapter(Platform):
                     messages = await list_messages()
                     if not messages:
                         return
-                    new_messages = self._select_new_messages(chat_id, selection_chat, messages)
+                    new_messages = self._select_new_messages(
+                        chat_id, selection_chat, messages
+                    )
             if not new_messages:
                 return
 
@@ -719,7 +747,9 @@ class AgentWeChatPlatformAdapter(Platform):
                 )
                 await self.handle_msg(converted)
 
-            self.last_seen_id[chat_id] = max(int(item.get("localId", 0) or 0) for item in new_messages)
+            self.last_seen_id[chat_id] = max(
+                int(item.get("localId", 0) or 0) for item in new_messages
+            )
             self._touch_chat(chat_id)
 
             if clear_unreads and skip_open and int(chat.get("unreadCount", 0) or 0) > 0:
@@ -745,7 +775,11 @@ class AgentWeChatPlatformAdapter(Platform):
             return ordered
 
         prev_last_seen = self.last_seen_id[chat_id]
-        return [item for item in ordered if int(item.get("localId", 0) or 0) > prev_last_seen]
+        return [
+            item
+            for item in ordered
+            if int(item.get("localId", 0) or 0) > prev_last_seen
+        ]
 
     async def _convert_message(
         self,
@@ -754,7 +788,9 @@ class AgentWeChatPlatformAdapter(Platform):
     ) -> AstrBotMessage | None:
         chat_id = str(chat.get("username") or chat.get("id") or "")
         sender_id = str(message.get("sender") or chat_id)
-        sender_name = str(message.get("senderName") or sender_id or chat.get("name") or "WeChat")
+        sender_name = str(
+            message.get("senderName") or sender_id or chat.get("name") or "WeChat"
+        )
         is_group = is_group_chat(chat_id) or bool(chat.get("isGroup"))
         raw_text = str(message.get("content") or "")
         is_mentioned = bool(message.get("isMentioned"))
@@ -764,7 +800,9 @@ class AgentWeChatPlatformAdapter(Platform):
         if is_group:
             # 当前桥接策略：群聊默认自动唤醒，不再要求显式 @ 机器人。
             is_mentioned = True
-        normalized_text = strip_leading_mentions(raw_text) if is_group else raw_text.strip()
+        normalized_text = (
+            strip_leading_mentions(raw_text) if is_group else raw_text.strip()
+        )
 
         components: list[Any] = []
         message_str_parts: list[str] = []
@@ -780,7 +818,9 @@ class AgentWeChatPlatformAdapter(Platform):
 
         base_type = int(message.get("type", 0) or 0) & 0x7FFFFFFF
         if base_type in MEDIA_TYPES:
-            media = await self._download_media(chat_id, int(message.get("localId", 0) or 0))
+            media = await self._download_media(
+                chat_id, int(message.get("localId", 0) or 0)
+            )
             if media is not None:
                 path, mime_type, filename = media
                 components.append(_mime_to_component(path, mime_type, filename))
@@ -859,12 +899,18 @@ class AgentWeChatPlatformAdapter(Platform):
         result: dict[str, Any] | None = None
         for attempt in range(MEDIA_RETRY_ATTEMPTS):
             try:
-                candidate = await asyncio.to_thread(self.client.get_media, chat_id, local_id)
+                candidate = await asyncio.to_thread(
+                    self.client.get_media, chat_id, local_id
+                )
             except AgentWeChatAPIError as exc:
-                logger.warning(f"[agent_wechat] media fetch failed for {chat_id}:{local_id}: {exc}")
+                logger.warning(
+                    f"[agent_wechat] media fetch failed for {chat_id}:{local_id}: {exc}"
+                )
                 return None
             except Exception as exc:
-                logger.warning(f"[agent_wechat] media fetch error for {chat_id}:{local_id}: {exc}")
+                logger.warning(
+                    f"[agent_wechat] media fetch error for {chat_id}:{local_id}: {exc}"
+                )
                 return None
 
             if candidate.get("type") == "unsupported":
@@ -903,11 +949,15 @@ class AgentWeChatPlatformAdapter(Platform):
                 "mp4": "video/mp4",
             },
         }
-        mime_type = mime_map.get(media_type, {}).get(media_format, "application/octet-stream")
+        mime_type = mime_map.get(media_type, {}).get(
+            media_format, "application/octet-stream"
+        )
 
         directory = os.path.join(_safe_temp_dir(), "agent_wechat_bridge")
         os.makedirs(directory, exist_ok=True)
-        path = os.path.join(directory, f"{chat_id.replace('/', '_')}_{local_id}_{filename}")
+        path = os.path.join(
+            directory, f"{chat_id.replace('/', '_')}_{local_id}_{filename}"
+        )
         with open(path, "wb") as handle:
             handle.write(base64.b64decode(encoded))
         return path, mime_type, filename
@@ -915,6 +965,10 @@ class AgentWeChatPlatformAdapter(Platform):
     async def handle_msg(self, message: AstrBotMessage) -> None:
         is_group = getattr(message, "type", None) == MessageType.GROUP_MESSAGE
         chat_id = getattr(message, "group_id", None) if is_group else message.session_id
+        logger.info(
+            "[agent_wechat][send] create event "
+            f"session={message.session_id} chat={chat_id} is_group={bool(is_group)}"
+        )
         event = AgentWeChatMessageEvent(
             message_str=message.message_str,
             message_obj=message,

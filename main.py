@@ -4,8 +4,8 @@
 `src/` 下的实际适配器实现。
 """
 
-from pathlib import Path
 import sys
+from pathlib import Path
 
 from astrbot.api.star import Context, Star, register
 
@@ -14,9 +14,15 @@ if str(PLUGIN_ROOT) not in sys.path:
     sys.path.insert(0, str(PLUGIN_ROOT))
 
 try:
-    from .src.agent_wechat_platform_adapter import AgentWeChatPlatformAdapter
+    from .src.agent_wechat_platform_adapter import (
+        AgentWeChatPlatformAdapter as _AgentWeChatPlatformAdapter,
+    )
 except ImportError:
-    from src.agent_wechat_platform_adapter import AgentWeChatPlatformAdapter
+    from src.agent_wechat_platform_adapter import (
+        AgentWeChatPlatformAdapter as _AgentWeChatPlatformAdapter,
+    )
+
+AgentWeChatPlatformAdapter = _AgentWeChatPlatformAdapter
 
 
 @register(

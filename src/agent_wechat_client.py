@@ -24,7 +24,9 @@ class AgentWeChatAPIError(RuntimeError):
 class WeChatClient:
     """对桥接服务接口的轻量封装。"""
 
-    def __init__(self, base_url: str, token: str | None = None, timeout: int = 15) -> None:
+    def __init__(
+        self, base_url: str, token: str | None = None, timeout: int = 15
+    ) -> None:
         self.base_url = self._normalize_url(base_url)
         self.token = token
         self.timeout = timeout
@@ -65,8 +67,7 @@ class WeChatClient:
         if not items:
             return ""
         return "?" + "&".join(
-            f"{quote(str(key))}={quote(str(value))}"
-            for key, value in items
+            f"{quote(str(key))}={quote(str(value))}" for key, value in items
         )
 
     def _get(self, path: str) -> Any:
@@ -187,9 +188,7 @@ class WeChatEventWebSocketClient:
 
     async def run_forever(self, stop_event: asyncio.Event) -> None:
         if websockets is None:
-            raise RuntimeError(
-                "需要安装 `websockets` 包才能使用事件流。"
-            )
+            raise RuntimeError("需要安装 `websockets` 包才能使用事件流。")
 
         reconnect_delay = 1.0
         while not stop_event.is_set():

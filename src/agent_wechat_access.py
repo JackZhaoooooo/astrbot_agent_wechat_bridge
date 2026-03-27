@@ -67,7 +67,9 @@ def extract_leading_mentions(text: str) -> list[str]:
     return mentions
 
 
-def is_leading_self_mention(text: str, aliases: list[str] | set[str] | tuple[str, ...]) -> bool:
+def is_leading_self_mention(
+    text: str, aliases: list[str] | set[str] | tuple[str, ...]
+) -> bool:
     """判断消息开头是否 @ 了机器人本人（按别名集合匹配）。"""
 
     mention_targets = extract_leading_mentions(text)
@@ -121,7 +123,9 @@ def should_forward_message(
     if is_group:
         if group_policy == "disabled":
             return False, "group_policy_disabled"
-        if group_policy == "allowlist" and not is_sender_allowed(sender_id, group_allowlist):
+        if group_policy == "allowlist" and not is_sender_allowed(
+            sender_id, group_allowlist
+        ):
             return False, "group_sender_not_allowlisted"
         if require_mention and not was_mentioned:
             return False, "mention_required"

@@ -2,7 +2,11 @@
 
 from astrbot.api.star import Context, Star, register
 
-from .agent_wechat_platform_adapter import AgentWeChatPlatformAdapter
+from .agent_wechat_platform_adapter import (
+    AgentWeChatPlatformAdapter as _AgentWeChatPlatformAdapter,
+)
+
+AgentWeChatPlatformAdapter = _AgentWeChatPlatformAdapter
 
 
 @register(
