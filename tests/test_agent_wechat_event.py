@@ -110,7 +110,7 @@ def _load_event_module():
     return importlib.import_module("src.agent_wechat_event")
 
 
-def test_build_send_payloads_expands_nodes_to_multiple_texts():
+def test_build_send_payloads_merges_nodes_to_single_text():
     module = _load_event_module()
     chain = module.MessageChain(
         [
@@ -128,12 +128,14 @@ def test_build_send_payloads_expands_nodes_to_multiple_texts():
     )
 
     assert payloads == [
-        {"chatId": "chat_x", "text": "one"},
-        {"chatId": "chat_x", "text": "two"},
+        {
+            "chatId": "chat_x",
+            "text": "Merged message (2 items):\none\ntwo",
+        }
     ]
 
 
-def test_build_send_payloads_expands_serialized_nodes_messages():
+def test_build_send_payloads_merges_serialized_nodes_messages():
     module = _load_event_module()
 
     class SerializedNodes:
@@ -165,8 +167,46 @@ def test_build_send_payloads_expands_serialized_nodes_messages():
     )
 
     assert payloads == [
-        {"chatId": "chat_y", "text": "first"},
-        {"chatId": "chat_y", "text": "second"},
+        {
+            "chatId": "chat_y",
+            "text": "Merged message (2 items):\nfirst\nsecond",
+        }
+    ]
+
+
+def test_build_send_payloads_merges_serialized_nodes_with_video_placeholder():
+    module = _load_event_module()
+
+    class SerializedNodesWithVideo:
+        async def to_dict(self):
+            return {
+                "messages": [
+                    {
+                        "type": "node",
+                        "data": {
+                            "nickname": "alice",
+                            "content": [
+                                {"type": "text", "data": {"text": "hello"}},
+                                {
+                                    "type": "video",
+                                    "data": {"file": "file:////tmp/v.mp4"},
+                                },
+                            ],
+                        },
+                    }
+                ]
+            }
+
+    chain = module.MessageChain([SerializedNodesWithVideo()])
+    payloads = asyncio.run(
+        module.AgentWeChatMessageEvent._build_send_payloads("chat_y2", chain)
+    )
+
+    assert payloads == [
+        {
+            "chatId": "chat_y2",
+            "text": "Merged message (1 items):\nalice: hello [video]",
+        }
     ]
 
 

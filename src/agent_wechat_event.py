@@ -33,6 +33,7 @@ SEND_LOG_PREFIX = "[agent_wechat][send]"
 SEND_RECOVERY_RETRY_ATTEMPTS = 3
 SEND_RECOVERY_RETRY_INTERVAL_SECONDS = 1.0
 SEND_RECOVERY_ERRORS = {"No action selected"}
+MERGE_NODES_TO_SINGLE_TEXT = True
 
 
 def _truncate(value: str, limit: int = 80) -> str:
@@ -85,6 +86,48 @@ def _summarize_payload(payload: dict[str, Any]) -> str:
         f"has_image={has_image}, image_mime={image_mime}, "
         f"has_file={has_file}, file_name={file_name}"
     )
+
+
+def _component_to_merge_text(component: Any) -> str:
+    if isinstance(component, Plain):
+        return str(getattr(component, "text", "") or "")
+    if isinstance(component, At):
+        name = (
+            getattr(component, "name", None) or getattr(component, "qq", None) or "user"
+        )
+        return f"@{name}"
+    if isinstance(component, Image):
+        return "[image]"
+    if isinstance(component, Video):
+        return "[video]"
+    if isinstance(component, Record):
+        return "[audio]"
+    if isinstance(component, File):
+        return "[file]"
+    return f"[{_component_type_name(component)}]"
+
+
+def _segment_dict_to_merge_text(segment: dict[str, Any]) -> str:
+    seg_type = str(segment.get("type") or "").lower()
+    seg_data = segment.get("data")
+    if not isinstance(seg_data, dict):
+        return ""
+    if seg_type in {"text", "plain"}:
+        return str(seg_data.get("text") or "")
+    if seg_type == "image":
+        return "[image]"
+    if seg_type == "video":
+        return "[video]"
+    if seg_type in {"record", "audio", "voice"}:
+        return "[audio]"
+    if seg_type == "file":
+        return "[file]"
+    if seg_type == "at":
+        target = (
+            seg_data.get("name") or seg_data.get("qq") or seg_data.get("id") or "user"
+        )
+        return f"@{target}"
+    return f"[{seg_type or 'segment'}]"
 
 
 def _guess_mime_type(path: str, fallback: str = "application/octet-stream") -> str:
@@ -170,6 +213,70 @@ class AgentWeChatMessageEvent(AstrMessageEvent):
                     f"chat={chat_id} text_len={len(text)}"
                 )
             text_buffer.clear()
+
+        def merge_node_component_text(component: Node | Nodes) -> str:
+            node_items = (
+                list(getattr(component, "nodes", []) or [])
+                if isinstance(component, Nodes)
+                else [component]
+            )
+            lines: list[str] = []
+            for node_item in node_items:
+                node_content = list(getattr(node_item, "content", []) or [])
+                if not node_content:
+                    continue
+                sender = str(getattr(node_item, "name", "") or "").strip()
+                parts = [
+                    _component_to_merge_text(item).strip() for item in node_content
+                ]
+                parts = [part for part in parts if part]
+                if not parts:
+                    continue
+                body = " ".join(parts).strip()
+                if sender:
+                    lines.append(f"{sender}: {body}")
+                else:
+                    lines.append(body)
+            if not lines:
+                return ""
+            return f"Merged message ({len(lines)} items):\n" + "\n".join(lines)
+
+        def merge_serialized_nodes_text(serialized: dict[str, Any]) -> str:
+            messages = serialized.get("messages")
+            if not isinstance(messages, list):
+                return ""
+            lines: list[str] = []
+            for node_item in messages:
+                if not isinstance(node_item, dict):
+                    continue
+                node_data = node_item.get("data")
+                if not isinstance(node_data, dict):
+                    continue
+                sender = str(
+                    node_data.get("nickname")
+                    or node_data.get("name")
+                    or node_data.get("user_id")
+                    or ""
+                ).strip()
+                content = node_data.get("content")
+                if not isinstance(content, list):
+                    continue
+                parts = [
+                    _segment_dict_to_merge_text(seg).strip()
+                    for seg in content
+                    if isinstance(seg, dict)
+                ]
+                parts = [part for part in parts if part]
+                if not parts:
+                    continue
+                body = " ".join(parts).strip()
+                if sender:
+                    lines.append(f"{sender}: {body}")
+                else:
+                    lines.append(body)
+            if not lines:
+                return ""
+            return f"Merged message ({len(lines)} items):\n" + "\n".join(lines)
 
         async def expand_serialized_nodes(
             serialized: dict[str, Any],
@@ -332,6 +439,16 @@ class AgentWeChatMessageEvent(AstrMessageEvent):
             )
 
             if isinstance(component, (Nodes, Node)):
+                if MERGE_NODES_TO_SINGLE_TEXT:
+                    merged_text = merge_node_component_text(component).strip()
+                    if merged_text:
+                        flush_text_only()
+                        payloads.append({"chatId": chat_id, "text": merged_text})
+                        logger.info(
+                            f"{SEND_LOG_PREFIX} merged node component to single text "
+                            f"chat={chat_id} index={index} text_len={len(merged_text)}"
+                        )
+                        continue
                 expanded = await expand_node_component(
                     component,
                     component_index=index,
@@ -428,6 +545,17 @@ class AgentWeChatMessageEvent(AstrMessageEvent):
                 )
                 serialized = await serialized
             if isinstance(serialized, dict):
+                if MERGE_NODES_TO_SINGLE_TEXT:
+                    merged_text = merge_serialized_nodes_text(serialized).strip()
+                    if merged_text:
+                        flush_text_only()
+                        payloads.append({"chatId": chat_id, "text": merged_text})
+                        logger.info(
+                            f"{SEND_LOG_PREFIX} merged serialized nodes to single text "
+                            f"chat={chat_id} index={index} text_len={len(merged_text)}"
+                        )
+                        continue
+
                 seg_type = str(serialized.get("type") or "").lower()
                 seg_data = serialized.get("data")
                 if isinstance(seg_data, dict) and seg_type in {
