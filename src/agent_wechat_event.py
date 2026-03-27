@@ -8,10 +8,13 @@ import inspect
 import mimetypes
 import os
 import re
+import unicodedata
 from collections.abc import AsyncGenerator
+from io import BytesIO
 from typing import Any
 
 import requests
+from PIL import Image as PILImage
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain
@@ -37,6 +40,7 @@ SEND_RECOVERY_ERRORS = {"No action selected"}
 MERGE_NODES_TO_SINGLE_TEXT = True
 ZERO_WIDTH_RE = re.compile(r"[\u200b-\u200f\u2060-\u206f\ufeff]")
 FORWARD_HEADER_RE = re.compile(r"^from\s+@[^:]{1,100}:?$", re.IGNORECASE)
+MAX_FILENAME_LENGTH = 96
 
 
 def _truncate(value: str, limit: int = 80) -> str:
@@ -171,6 +175,41 @@ def _extract_segment_filename(seg_data: dict[str, Any], fallback: str = "file") 
         if isinstance(value, str) and value.strip():
             return value.strip()
     return fallback
+
+
+def _sanitize_filename(name: str, fallback: str = "file.bin") -> str:
+    original = (name or "").strip()
+    if not original:
+        original = fallback
+    original = os.path.basename(original).replace("\x00", "")
+    stem, ext = os.path.splitext(original)
+    ext = (ext or ".bin")[:16]
+    normalized = unicodedata.normalize("NFKD", stem)
+    ascii_name = normalized.encode("ascii", "ignore").decode("ascii")
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", ascii_name).strip("._-")
+    if not safe:
+        safe = "file"
+    max_stem_len = max(8, MAX_FILENAME_LENGTH - len(ext))
+    safe = safe[:max_stem_len]
+    return f"{safe}{ext}"
+
+
+def _normalize_image_for_wechat(data: bytes, mime_type: str) -> tuple[bytes, str]:
+    lower_mime = (mime_type or "").lower()
+    if lower_mime in {"image/png", "image/jpeg", "image/jpg", "image/gif"}:
+        return data, ("image/jpeg" if lower_mime == "image/jpg" else lower_mime)
+    try:
+        with PILImage.open(BytesIO(data)) as img:
+            if img.mode not in {"RGB", "RGBA"}:
+                img = img.convert("RGBA")
+            output = BytesIO()
+            img.save(output, format="PNG")
+            return output.getvalue(), "image/png"
+    except Exception:
+        logger.warning(
+            f"{SEND_LOG_PREFIX} failed to normalize image mime={mime_type}, keep original bytes"
+        )
+        return data, mime_type or "image/png"
 
 
 async def _segment_to_dict(seg: Any) -> dict[str, Any] | None:
@@ -411,12 +450,19 @@ class AgentWeChatMessageEvent(AstrMessageEvent):
                             30,
                             "image/png",
                         )
+                        image_data, normalized_mime = await asyncio.to_thread(
+                            _normalize_image_for_wechat,
+                            data,
+                            mime_type or "image/png",
+                        )
                         payloads.append(
                             {
                                 "chatId": chat_id,
                                 "image": {
-                                    "data": base64.b64encode(data).decode("utf-8"),
-                                    "mimeType": mime_type or "image/png",
+                                    "data": base64.b64encode(image_data).decode(
+                                        "utf-8"
+                                    ),
+                                    "mimeType": normalized_mime or "image/png",
                                 },
                             }
                         )
@@ -441,14 +487,17 @@ class AgentWeChatMessageEvent(AstrMessageEvent):
                         data, _, filename = await asyncio.to_thread(
                             _load_binary_from_path, str(source)
                         )
+                        safe_filename = _sanitize_filename(
+                            _extract_segment_filename(
+                                seg_data, fallback=str(filename or "file.bin")
+                            )
+                        )
                         payloads.append(
                             {
                                 "chatId": chat_id,
                                 "file": {
                                     "data": base64.b64encode(data).decode("utf-8"),
-                                    "filename": _extract_segment_filename(
-                                        seg_data, fallback=str(filename or "file")
-                                    ),
+                                    "filename": safe_filename,
                                 },
                             }
                         )
@@ -585,11 +634,14 @@ class AgentWeChatMessageEvent(AstrMessageEvent):
                 data, mime_type, _ = await asyncio.to_thread(
                     _load_binary_from_path, source, 30, "image/png"
                 )
+                image_data, normalized_mime = await asyncio.to_thread(
+                    _normalize_image_for_wechat, data, mime_type or "image/png"
+                )
                 payload: dict[str, Any] = {
                     "chatId": chat_id,
                     "image": {
-                        "data": base64.b64encode(data).decode("utf-8"),
-                        "mimeType": mime_type or "image/png",
+                        "data": base64.b64encode(image_data).decode("utf-8"),
+                        "mimeType": normalized_mime or "image/png",
                     },
                 }
                 text = "".join(text_buffer).strip()
@@ -620,13 +672,14 @@ class AgentWeChatMessageEvent(AstrMessageEvent):
                 data, _, filename = await asyncio.to_thread(
                     _load_binary_from_path, source
                 )
+                safe_filename = _sanitize_filename(
+                    str(getattr(component, "name", None) or filename or "file.bin")
+                )
                 payload = {
                     "chatId": chat_id,
                     "file": {
                         "data": base64.b64encode(data).decode("utf-8"),
-                        "filename": getattr(component, "name", None)
-                        or filename
-                        or "file",
+                        "filename": safe_filename,
                     },
                 }
                 text = "".join(text_buffer).strip()
@@ -695,13 +748,16 @@ class AgentWeChatMessageEvent(AstrMessageEvent):
                         data, _, filename = await asyncio.to_thread(
                             _load_binary_from_path, str(source)
                         )
+                        safe_filename = _sanitize_filename(
+                            _extract_segment_filename(
+                                seg_data, fallback=str(filename or "file.bin")
+                            )
+                        )
                         payload = {
                             "chatId": chat_id,
                             "file": {
                                 "data": base64.b64encode(data).decode("utf-8"),
-                                "filename": _extract_segment_filename(
-                                    seg_data, fallback=str(filename or "file")
-                                ),
+                                "filename": safe_filename,
                             },
                         }
                         payloads.append(payload)

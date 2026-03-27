@@ -254,7 +254,9 @@ def test_build_send_payloads_merges_serialized_nodes_strips_forward_header():
     ]
 
 
-def test_build_send_payloads_merges_serialized_nodes_with_video_file_payload(monkeypatch):
+def test_build_send_payloads_merges_serialized_nodes_with_video_file_payload(
+    monkeypatch,
+):
     module = _load_event_module()
     monkeypatch.setattr(
         module,
@@ -345,7 +347,9 @@ def test_build_send_payloads_merges_serialized_nodes_with_base64_image_payload()
     ]
 
 
-def test_build_send_payloads_merges_serialized_nodes_with_path_video_payload(monkeypatch):
+def test_build_send_payloads_merges_serialized_nodes_with_path_video_payload(
+    monkeypatch,
+):
     module = _load_event_module()
     monkeypatch.setattr(
         module,
@@ -395,6 +399,61 @@ def test_build_send_payloads_merges_serialized_nodes_with_path_video_payload(mon
     ]
 
 
+def test_build_send_payloads_merges_serialized_nodes_sanitizes_video_filename(
+    monkeypatch,
+):
+    module = _load_event_module()
+    monkeypatch.setattr(
+        module,
+        "_load_binary_from_path",
+        lambda path, timeout=30, fallback_mime="application/octet-stream": (
+            b"vid-name",
+            "video/mp4",
+            "原始名字.mp4",
+        ),
+    )
+
+    class SerializedNodesWithChineseVideoName:
+        async def to_dict(self):
+            return {
+                "messages": [
+                    {
+                        "type": "node",
+                        "data": {
+                            "nickname": "alice",
+                            "content": [
+                                {
+                                    "type": "video",
+                                    "data": {
+                                        "file": "file:////tmp/video.mp4",
+                                        "name": "【東雪莲】被东洋雪莲粉丝超过_莲莲_能让他投不投的了稿全在我一念之间_30283138776.mp4",
+                                    },
+                                },
+                            ],
+                        },
+                    }
+                ]
+            }
+
+    chain = module.MessageChain([SerializedNodesWithChineseVideoName()])
+    payloads = asyncio.run(
+        module.AgentWeChatMessageEvent._build_send_payloads("chat_video_name", chain)
+    )
+    assert payloads == [
+        {
+            "chatId": "chat_video_name",
+            "text": "Merged message (1 items):\nalice: [video]",
+        },
+        {
+            "chatId": "chat_video_name",
+            "file": {
+                "data": "dmlkLW5hbWU=",
+                "filename": "30283138776.mp4",
+            },
+        },
+    ]
+
+
 def test_build_send_payloads_splits_text_before_image(monkeypatch):
     module = _load_event_module()
     monkeypatch.setattr(
@@ -426,6 +485,33 @@ def test_build_send_payloads_splits_text_before_image(monkeypatch):
             },
         },
     ]
+
+
+def test_build_send_payloads_normalizes_webp_image_to_png(monkeypatch):
+    module = _load_event_module()
+    # 1x1 png bytes; mime is intentionally set as webp to test normalization.
+    png_data = (
+        b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+        b"\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0cIDAT\x08\xd7c\xf8\xcf\xc0"
+        b"\x00\x00\x03\x01\x01\x00\xc9\xfe\x92\xef\x00\x00\x00\x00IEND\xaeB`\x82"
+    )
+    monkeypatch.setattr(
+        module,
+        "_load_binary_from_path",
+        lambda path, timeout=30, fallback_mime="application/octet-stream": (
+            png_data,
+            "image/webp",
+            "a.webp",
+        ),
+    )
+    chain = module.MessageChain([module.Image(file="/tmp/a.webp")])
+    payloads = asyncio.run(
+        module.AgentWeChatMessageEvent._build_send_payloads("chat_webp", chain)
+    )
+    assert len(payloads) == 1
+    assert payloads[0]["chatId"] == "chat_webp"
+    assert payloads[0]["image"]["mimeType"] == "image/png"
+    assert payloads[0]["image"]["data"].startswith("iVBORw0KGgo")
 
 
 def test_build_send_payloads_supports_video_component(monkeypatch):
