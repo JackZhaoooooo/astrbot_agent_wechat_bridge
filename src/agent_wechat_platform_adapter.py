@@ -48,6 +48,8 @@ POLL_INTERVAL_MS = 200
 FULL_SYNC_INTERVAL_MS = 1200
 AUTH_POLL_INTERVAL_MS = 30000
 LOGIN_PAGE_WARN_INTERVAL_SECONDS = 60.0
+BASELINE_SYNC_PAGE_SIZE = 200
+BASELINE_SYNC_MAX_PAGES = 20
 HOT_PATH_TIMEOUT_SECONDS = 0.8
 FAST_PROBE_LIMIT = 1
 FAST_PROBE_FETCH_LIMIT = 1
@@ -150,6 +152,7 @@ class AgentWeChatPlatformAdapter(Platform):
         self.last_auth_check = 0.0
         self.last_auth_status: str | None = None
         self.last_login_page_warn_at = 0.0
+        self.suppress_inbound_during_relogin = False
         self.self_id = "agent_wechat"
         self.self_aliases: set[str] = set()
         self._add_self_alias(self.self_id)
@@ -363,6 +366,9 @@ class AgentWeChatPlatformAdapter(Platform):
         await self._dispatch_ws_payload(payload)
 
     async def _dispatch_ws_payload(self, payload: Any) -> None:
+        if self.suppress_inbound_during_relogin:
+            return
+
         if isinstance(payload, list):
             for item in payload:
                 await self._dispatch_ws_payload(item)
@@ -543,6 +549,7 @@ class AgentWeChatPlatformAdapter(Platform):
             return self.last_auth_status == "logged_in"
 
         self.last_auth_check = now_ms
+        prev_status = self.last_auth_status
         try:
             auth = await asyncio.to_thread(self.client.auth_status)
         except Exception as exc:
@@ -560,8 +567,63 @@ class AgentWeChatPlatformAdapter(Platform):
                 self._warn_login_page_throttled()
             return False
 
+        if prev_status != "logged_in":
+            await self._rebaseline_after_relogin()
+
         self.last_login_page_warn_at = 0.0
         return True
+
+    async def _rebaseline_after_relogin(self) -> None:
+        """登录恢复后，将各会话基线推进到当前最新，避免回灌离线期间消息。"""
+
+        self.suppress_inbound_during_relogin = True
+        try:
+            offset = 0
+            pages = 0
+            while pages < BASELINE_SYNC_MAX_PAGES:
+                chats = await asyncio.to_thread(
+                    self.client.list_chats,
+                    BASELINE_SYNC_PAGE_SIZE,
+                    offset,
+                )
+                if not chats:
+                    break
+
+                for chat in chats:
+                    chat_id = str(chat.get("username") or chat.get("id") or "")
+                    if not chat_id or is_official_account(chat_id):
+                        continue
+
+                    baseline = int(chat.get("lastMsgLocalId", 0) or 0)
+                    if baseline <= 0 and int(chat.get("unreadCount", 0) or 0) > 0:
+                        # 少量兼容：极端情况下 lastMsgLocalId 未更新，尝试拉 1 条取最新 localId。
+                        try:
+                            latest = await self._call_client(
+                                self.client.list_messages,
+                                chat_id,
+                                1,
+                                0,
+                                timeout=HOT_PATH_TIMEOUT_SECONDS,
+                            )
+                            if isinstance(latest, list) and latest:
+                                baseline = int(latest[0].get("localId", 0) or 0)
+                        except Exception:
+                            pass
+
+                    if baseline > 0:
+                        self.last_seen_id[chat_id] = max(
+                            self.last_seen_id.get(chat_id, 0),
+                            baseline,
+                        )
+
+                if len(chats) < BASELINE_SYNC_PAGE_SIZE:
+                    break
+                offset += BASELINE_SYNC_PAGE_SIZE
+                pages += 1
+        except Exception as exc:
+            logger.warning(f"[agent_wechat] relogin baseline sync failed: {exc}")
+        finally:
+            self.suppress_inbound_during_relogin = False
 
     async def _process_chat(
         self,
