@@ -14,7 +14,7 @@ import requests
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain
-from astrbot.api.message_components import At, File, Image, Plain, Record
+from astrbot.api.message_components import At, File, Image, Node, Nodes, Plain, Record
 from astrbot.api.platform import Group
 
 from .agent_wechat_client import WeChatClient
@@ -48,6 +48,12 @@ def _describe_component(component: Any) -> str:
         source = getattr(component, "file", None) or getattr(component, "url", None)
         name = getattr(component, "name", None)
         return f"{comp_type}(source={source}, name={name})"
+    if isinstance(component, Nodes):
+        nodes = list(getattr(component, "nodes", []) or [])
+        return f"{comp_type}(nodes={len(nodes)})"
+    if isinstance(component, Node):
+        content = list(getattr(component, "content", []) or [])
+        return f"{comp_type}(content={len(content)})"
     return comp_type
 
 
@@ -153,11 +159,115 @@ class AgentWeChatMessageEvent(AstrMessageEvent):
                 )
             text_buffer.clear()
 
+        async def expand_serialized_nodes(
+            serialized: dict[str, Any],
+            *,
+            component_index: int,
+        ) -> int:
+            messages = serialized.get("messages")
+            if not isinstance(messages, list):
+                return 0
+
+            expanded = 0
+            for node_idx, node_item in enumerate(messages):
+                if not isinstance(node_item, dict):
+                    continue
+                node_data = node_item.get("data")
+                if not isinstance(node_data, dict):
+                    continue
+                content = node_data.get("content")
+                if not isinstance(content, list):
+                    continue
+
+                node_text_parts: list[str] = []
+                for seg in content:
+                    if not isinstance(seg, dict):
+                        continue
+                    seg_type = str(seg.get("type") or "").lower()
+                    seg_data = seg.get("data")
+                    if seg_type not in {"text", "plain"} or not isinstance(
+                        seg_data, dict
+                    ):
+                        continue
+                    seg_text = str(seg_data.get("text") or "")
+                    if seg_text:
+                        node_text_parts.append(seg_text)
+
+                node_text = "".join(node_text_parts).strip()
+                if not node_text:
+                    logger.warning(
+                        f"{SEND_LOG_PREFIX} serialized node has no text segment "
+                        f"chat={chat_id} index={component_index} node={node_idx}"
+                    )
+                    continue
+
+                payload = {"chatId": chat_id, "text": node_text}
+                payloads.append(payload)
+                expanded += 1
+                logger.info(
+                    f"{SEND_LOG_PREFIX} append node-text payload "
+                    f"chat={chat_id} index={component_index} node={node_idx} "
+                    f"text_len={len(node_text)}"
+                )
+
+            if expanded > 0:
+                logger.info(
+                    f"{SEND_LOG_PREFIX} expanded serialized nodes "
+                    f"chat={chat_id} index={component_index} payloads={expanded}"
+                )
+            return expanded
+
+        async def expand_node_component(
+            component: Node | Nodes,
+            *,
+            component_index: int,
+        ) -> int:
+            flush_text_only()
+
+            node_items: list[Any]
+            if isinstance(component, Nodes):
+                node_items = list(getattr(component, "nodes", []) or [])
+            else:
+                node_items = [component]
+
+            expanded = 0
+            for node_idx, node_item in enumerate(node_items):
+                node_content = list(getattr(node_item, "content", []) or [])
+                if not node_content:
+                    continue
+                nested_payloads = await cls._build_send_payloads(
+                    chat_id, MessageChain(node_content)
+                )
+                if not nested_payloads:
+                    continue
+                payloads.extend(nested_payloads)
+                expanded += len(nested_payloads)
+                logger.info(
+                    f"{SEND_LOG_PREFIX} expanded node component "
+                    f"chat={chat_id} index={component_index} node={node_idx} "
+                    f"payloads={len(nested_payloads)}"
+                )
+
+            if expanded > 0:
+                logger.info(
+                    f"{SEND_LOG_PREFIX} expanded nodes from component "
+                    f"chat={chat_id} index={component_index} payloads={expanded}"
+                )
+            return expanded
+
         for index, component in enumerate(message_chain.chain):
             logger.info(
                 f"{SEND_LOG_PREFIX} process component "
                 f"chat={chat_id} index={index} detail={_describe_component(component)}"
             )
+
+            if isinstance(component, (Nodes, Node)):
+                expanded = await expand_node_component(
+                    component,
+                    component_index=index,
+                )
+                if expanded > 0:
+                    continue
 
             if isinstance(component, Plain):
                 cls._push_text(text_buffer, component.text)
@@ -240,6 +350,12 @@ class AgentWeChatMessageEvent(AstrMessageEvent):
                 )
                 serialized = await serialized
             if isinstance(serialized, dict):
+                expanded = await expand_serialized_nodes(
+                    serialized,
+                    component_index=index,
+                )
+                if expanded > 0:
+                    continue
                 cls._push_text(text_buffer, str(serialized))
                 logger.info(
                     f"{SEND_LOG_PREFIX} append serialized component as text "
