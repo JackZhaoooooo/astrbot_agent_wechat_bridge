@@ -7,6 +7,7 @@ import base64
 import inspect
 import mimetypes
 import os
+import re
 from collections.abc import AsyncGenerator
 from typing import Any
 
@@ -34,6 +35,8 @@ SEND_RECOVERY_RETRY_ATTEMPTS = 3
 SEND_RECOVERY_RETRY_INTERVAL_SECONDS = 1.0
 SEND_RECOVERY_ERRORS = {"No action selected"}
 MERGE_NODES_TO_SINGLE_TEXT = True
+ZERO_WIDTH_RE = re.compile(r"[\u200b-\u200f\u2060-\u206f\ufeff]")
+FORWARD_HEADER_RE = re.compile(r"^from\s+@[^:]{1,100}:?$", re.IGNORECASE)
 
 
 def _truncate(value: str, limit: int = 80) -> str:
@@ -128,6 +131,15 @@ def _segment_dict_to_merge_text(segment: dict[str, Any]) -> str:
         )
         return f"@{target}"
     return f"[{seg_type or 'segment'}]"
+
+
+def _normalize_merged_text(value: str) -> str:
+    text = ZERO_WIDTH_RE.sub("", value or "")
+    lines = [line.strip() for line in text.replace("\r\n", "\n").split("\n")]
+    lines = [line for line in lines if line]
+    if lines and FORWARD_HEADER_RE.match(lines[0]) and len(lines) > 1:
+        lines = lines[1:]
+    return " ".join(lines).strip()
 
 
 def _guess_mime_type(path: str, fallback: str = "application/octet-stream") -> str:
@@ -227,12 +239,15 @@ class AgentWeChatMessageEvent(AstrMessageEvent):
                     continue
                 sender = str(getattr(node_item, "name", "") or "").strip()
                 parts = [
-                    _component_to_merge_text(item).strip() for item in node_content
+                    _normalize_merged_text(_component_to_merge_text(item)).strip()
+                    for item in node_content
                 ]
                 parts = [part for part in parts if part]
                 if not parts:
                     continue
-                body = " ".join(parts).strip()
+                body = _normalize_merged_text(" ".join(parts))
+                if not body:
+                    continue
                 if sender:
                     lines.append(f"{sender}: {body}")
                 else:
@@ -262,14 +277,16 @@ class AgentWeChatMessageEvent(AstrMessageEvent):
                 if not isinstance(content, list):
                     continue
                 parts = [
-                    _segment_dict_to_merge_text(seg).strip()
+                    _normalize_merged_text(_segment_dict_to_merge_text(seg)).strip()
                     for seg in content
                     if isinstance(seg, dict)
                 ]
                 parts = [part for part in parts if part]
                 if not parts:
                     continue
-                body = " ".join(parts).strip()
+                body = _normalize_merged_text(" ".join(parts))
+                if not body:
+                    continue
                 if sender:
                     lines.append(f"{sender}: {body}")
                 else:
@@ -282,6 +299,7 @@ class AgentWeChatMessageEvent(AstrMessageEvent):
             serialized: dict[str, Any],
             *,
             component_index: int,
+            include_text: bool = True,
         ) -> int:
             messages = serialized.get("messages")
             if not isinstance(messages, list):
@@ -304,12 +322,13 @@ class AgentWeChatMessageEvent(AstrMessageEvent):
                     node_text = "".join(node_text_parts).strip()
                     if not node_text:
                         return
-                    payloads.append({"chatId": chat_id, "text": node_text})
-                    logger.info(
-                        f"{SEND_LOG_PREFIX} append node-text payload "
-                        f"chat={chat_id} index={component_index} node={node_idx} "
-                        f"text_len={len(node_text)}"
-                    )
+                    if include_text:
+                        payloads.append({"chatId": chat_id, "text": node_text})
+                        logger.info(
+                            f"{SEND_LOG_PREFIX} append node-text payload "
+                            f"chat={chat_id} index={component_index} node={node_idx} "
+                            f"text_len={len(node_text)}"
+                        )
                     node_text_parts.clear()
 
                 for seg in content:
@@ -378,7 +397,7 @@ class AgentWeChatMessageEvent(AstrMessageEvent):
                         continue
 
                 node_text = "".join(node_text_parts).strip()
-                if node_text:
+                if node_text and include_text:
                     payloads.append({"chatId": chat_id, "text": node_text})
                     expanded += 1
                     logger.info(
@@ -398,6 +417,7 @@ class AgentWeChatMessageEvent(AstrMessageEvent):
             component: Node | Nodes,
             *,
             component_index: int,
+            include_text: bool = True,
         ) -> int:
             flush_text_only()
 
@@ -417,12 +437,24 @@ class AgentWeChatMessageEvent(AstrMessageEvent):
                 )
                 if not nested_payloads:
                     continue
-                payloads.extend(nested_payloads)
-                expanded += len(nested_payloads)
+                append_payloads = (
+                    nested_payloads
+                    if include_text
+                    else [
+                        payload
+                        for payload in nested_payloads
+                        if isinstance(payload, dict)
+                        and ("image" in payload or "file" in payload)
+                    ]
+                )
+                if not append_payloads:
+                    continue
+                payloads.extend(append_payloads)
+                expanded += len(append_payloads)
                 logger.info(
                     f"{SEND_LOG_PREFIX} expanded node component "
                     f"chat={chat_id} index={component_index} node={node_idx} "
-                    f"payloads={len(nested_payloads)}"
+                    f"payloads={len(append_payloads)} include_text={include_text}"
                 )
 
             if expanded > 0:
@@ -448,6 +480,17 @@ class AgentWeChatMessageEvent(AstrMessageEvent):
                             f"{SEND_LOG_PREFIX} merged node component to single text "
                             f"chat={chat_id} index={index} text_len={len(merged_text)}"
                         )
+                    expanded_media = await expand_node_component(
+                        component,
+                        component_index=index,
+                        include_text=False,
+                    )
+                    if merged_text or expanded_media > 0:
+                        if expanded_media > 0:
+                            logger.info(
+                                f"{SEND_LOG_PREFIX} merged node component appended media payloads "
+                                f"chat={chat_id} index={index} payloads={expanded_media}"
+                            )
                         continue
                 expanded = await expand_node_component(
                     component,
@@ -554,6 +597,17 @@ class AgentWeChatMessageEvent(AstrMessageEvent):
                             f"{SEND_LOG_PREFIX} merged serialized nodes to single text "
                             f"chat={chat_id} index={index} text_len={len(merged_text)}"
                         )
+                    expanded_media = await expand_serialized_nodes(
+                        serialized,
+                        component_index=index,
+                        include_text=False,
+                    )
+                    if merged_text or expanded_media > 0:
+                        if expanded_media > 0:
+                            logger.info(
+                                f"{SEND_LOG_PREFIX} merged serialized nodes appended media payloads "
+                                f"chat={chat_id} index={index} payloads={expanded_media}"
+                            )
                         continue
 
                 seg_type = str(serialized.get("type") or "").lower()

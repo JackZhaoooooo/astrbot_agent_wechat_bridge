@@ -135,6 +135,47 @@ def test_build_send_payloads_merges_nodes_to_single_text():
     ]
 
 
+def test_build_send_payloads_merges_nodes_and_keeps_video_file_payload(monkeypatch):
+    module = _load_event_module()
+    monkeypatch.setattr(
+        module,
+        "_load_binary_from_path",
+        lambda path, timeout=30: (b"node-vid", "video/mp4", "node-video.mp4"),
+    )
+    chain = module.MessageChain(
+        [
+            module.Nodes(
+                nodes=[
+                    module.Node(
+                        content=[
+                            module.Plain(text="From @AI测试群:\n\u200bhello"),
+                            module.Video(file="file:////tmp/node-video.mp4"),
+                        ]
+                    )
+                ]
+            )
+        ]
+    )
+
+    payloads = asyncio.run(
+        module.AgentWeChatMessageEvent._build_send_payloads("chat_node_video", chain)
+    )
+
+    assert payloads == [
+        {
+            "chatId": "chat_node_video",
+            "text": "Merged message (1 items):\nhello [video]",
+        },
+        {
+            "chatId": "chat_node_video",
+            "file": {
+                "data": "bm9kZS12aWQ=",
+                "filename": "node-video.mp4",
+            },
+        },
+    ]
+
+
 def test_build_send_payloads_merges_serialized_nodes_messages():
     module = _load_event_module()
 
@@ -174,8 +215,48 @@ def test_build_send_payloads_merges_serialized_nodes_messages():
     ]
 
 
-def test_build_send_payloads_merges_serialized_nodes_with_video_placeholder():
+def test_build_send_payloads_merges_serialized_nodes_strips_forward_header():
     module = _load_event_module()
+
+    class SerializedNodesForwardText:
+        async def to_dict(self):
+            return {
+                "messages": [
+                    {
+                        "type": "node",
+                        "data": {
+                            "nickname": "alice",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "data": {"text": "From @AI测试群:\n\u200b😭"},
+                                },
+                            ],
+                        },
+                    }
+                ]
+            }
+
+    chain = module.MessageChain([SerializedNodesForwardText()])
+    payloads = asyncio.run(
+        module.AgentWeChatMessageEvent._build_send_payloads("chat_header", chain)
+    )
+
+    assert payloads == [
+        {
+            "chatId": "chat_header",
+            "text": "Merged message (1 items):\nalice: 😭",
+        }
+    ]
+
+
+def test_build_send_payloads_merges_serialized_nodes_with_video_file_payload(monkeypatch):
+    module = _load_event_module()
+    monkeypatch.setattr(
+        module,
+        "_load_binary_from_path",
+        lambda path, timeout=30: (b"node-video", "video/mp4", "node.mp4"),
+    )
 
     class SerializedNodesWithVideo:
         async def to_dict(self):
@@ -206,7 +287,14 @@ def test_build_send_payloads_merges_serialized_nodes_with_video_placeholder():
         {
             "chatId": "chat_y2",
             "text": "Merged message (1 items):\nalice: hello [video]",
-        }
+        },
+        {
+            "chatId": "chat_y2",
+            "file": {
+                "data": "bm9kZS12aWRlbw==",
+                "filename": "node.mp4",
+            },
+        },
     ]
 
 
