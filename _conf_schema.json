@@ -1,0 +1,8 @@
+{
+  "logout_notify_umos": {
+    "type": "list",
+    "description": "退出登录提醒",
+    "hint": "UMO列表，/sid获取，列表组件（配置后向UMO列表发消息）",
+    "default": []
+  }
+}

@@ -11,7 +11,7 @@ import tempfile
 import time
 from contextlib import suppress
 from datetime import datetime
-from typing import Any, cast
+from typing import Any, Awaitable, Callable, cast
 
 from astrbot.api import logger
 from astrbot.api.message_components import At, File, Image, Plain, Record
@@ -125,6 +125,15 @@ def _mime_to_component(path: str, mime_type: str, filename: str):
 class AgentWeChatPlatformAdapter(Platform):
     """以事件流为主触发，接口补偿兜底。"""
 
+    _logout_notifier: Callable[[str], Awaitable[None] | None] | None = None
+
+    @classmethod
+    def set_logout_notifier(
+        cls,
+        notifier: Callable[[str], Awaitable[None] | None] | None,
+    ) -> None:
+        cls._logout_notifier = notifier
+
     def __init__(
         self,
         platform_config: dict[str, Any],
@@ -232,10 +241,22 @@ class AgentWeChatPlatformAdapter(Platform):
         if now - self.last_login_page_warn_at < LOGIN_PAGE_WARN_INTERVAL_SECONDS:
             return
         self.last_login_page_warn_at = now
-        logger.warning(
-            "[agent_wechat] 微信疑似已掉回登录页（auth=logged_out），"
+        warn_text = (
+            "微信疑似已掉回登录页（auth=logged_out），"
             "请打开 noVNC 完成重新登录；该提示每60秒提醒一次"
         )
+        logger.warning(f"[agent_wechat] {warn_text}")
+
+        notifier = self.__class__._logout_notifier
+        if notifier is None:
+            return
+
+        try:
+            maybe_result = notifier(warn_text)
+            if asyncio.iscoroutine(maybe_result):
+                asyncio.create_task(maybe_result)
+        except Exception as exc:
+            logger.warning(f"[agent_wechat] 退出登录提醒回调失败: {exc}")
 
     def _seed_active_chats(self, chats: list[dict[str, Any]]) -> None:
         for chat in chats[:ACTIVE_CHAT_SEED]:
