@@ -77,7 +77,10 @@ class AgentWeChatBridgePlugin(Star):
         return sent
 
     async def _notify_logout(self, warn_text: str) -> None:
-        chain = MessageChain().message(f"[agent-wechat] {warn_text}")
+        _ = warn_text
+        chain = MessageChain().message(
+            "[agent-wechat]微信好像退出登录了呢，输入/wxauth登录吧"
+        )
         await self._broadcast_chain(chain)
 
     async def terminate(self) -> None:
