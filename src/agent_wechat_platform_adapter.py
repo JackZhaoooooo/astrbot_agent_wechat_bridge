@@ -267,7 +267,6 @@ class AgentWeChatPlatformAdapter(Platform):
             return
 
         self.last_login_page_warn_at = now
-        self.__class__._logout_warn_sent_count += 1
 
         warn_text = (
             "微信疑似已掉回登录页（auth=logged_out），"
@@ -283,6 +282,7 @@ class AgentWeChatPlatformAdapter(Platform):
             maybe_result = notifier(warn_text)
             if asyncio.iscoroutine(maybe_result):
                 asyncio.create_task(maybe_result)
+            self.__class__._logout_warn_sent_count += 1
         except Exception as exc:
             logger.warning(f"[agent_wechat] 退出登录提醒回调失败: {exc}")
 

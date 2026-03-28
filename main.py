@@ -109,6 +109,7 @@ class AgentWeChatBridgePlugin(Star):
 
     async def terminate(self) -> None:
         AgentWeChatPlatformAdapter.set_logout_notifier(None)
+        AgentWeChatPlatformAdapter.reset_logout_warning_state()
 
     @filter.command("wxauth")
     async def wxauth(self, event: AstrMessageEvent):
