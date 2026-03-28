@@ -168,9 +168,9 @@ class AgentWeChatBridgePlugin(Star):
     async def _render_terminal_capture_image(self, output: str) -> str | None:
         escaped = html.escape(output)
         template = """
-        <div style=\"display:inline-block;padding:12px 14px;background:#0b1220;color:#e5e7eb;font-family:Consolas,Monaco,monospace;border-radius:8px;\">
-          <div style=\"font-size:16px;font-weight:600;margin-bottom:8px;color:#93c5fd;\">wx auth login terminal capture</div>
-          <pre style=\"margin:0;white-space:pre-wrap;word-break:break-word;line-height:1.35;font-size:15px;\">{{ text }}</pre>
+        <div style=\"width:100vw;height:100vh;box-sizing:border-box;padding:16px 18px;background:#0b1220;color:#e5e7eb;font-family:Consolas,Monaco,monospace;\">
+          <div style=\"font-size:18px;font-weight:600;margin-bottom:10px;color:#93c5fd;\">wx auth login terminal capture</div>
+          <pre style=\"margin:0;white-space:pre-wrap;word-break:break-word;line-height:1.4;font-size:16px;\">{{ text }}</pre>
         </div>
         """
         options = {
