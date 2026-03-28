@@ -8,7 +8,7 @@
   "logout_notify_max_count": {
     "type": "int",
     "description": "退出登录消息最大发送数量",
-    "default": 0
+    "default": 3
   },
   "logout_notify_interval_seconds": {
     "type": "float",
