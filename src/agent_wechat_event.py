@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import inspect
 import mimetypes
 import os
 import re
+import time
 import unicodedata
 from collections.abc import AsyncGenerator
 from io import BytesIO
@@ -39,6 +41,7 @@ SEND_RECOVERY_RETRY_INTERVAL_SECONDS = 1.0
 SEND_RECOVERY_ERRORS = {"No action selected"}
 IGNORED_SERIALIZED_SEG_TYPES = {"reply"}
 MAX_FILENAME_LENGTH = 96
+OUTBOUND_IMAGE_DEDUP_WINDOW_SECONDS = 8.0
 
 
 def _component_type_name(component: Any) -> str:
@@ -154,6 +157,9 @@ def _load_binary_from_path(
 
 class AgentWeChatMessageEvent(AstrMessageEvent):
     """单条微信入站消息对应的事件封装。"""
+
+    _recent_outbound_image_signatures: dict[str, float] = {}
+    _outbound_image_dedup_lock = asyncio.Lock()
 
     def __init__(
         self,
@@ -468,6 +474,53 @@ class AgentWeChatMessageEvent(AstrMessageEvent):
         return payloads
 
     @classmethod
+    def _build_outbound_image_signature(
+        cls,
+        chat_id: str,
+        mime_type: str,
+        base64_data: str,
+    ) -> str:
+        digest = hashlib.sha256(base64_data.encode("utf-8")).hexdigest()
+        return f"{chat_id}:{mime_type}:{digest}"
+
+    @classmethod
+    async def _should_skip_duplicate_image_payload(
+        cls,
+        chat_id: str,
+        payload: dict[str, Any],
+    ) -> bool:
+        image = payload.get("image")
+        if not isinstance(image, dict):
+            return False
+
+        base64_data = str(image.get("data") or "")
+        if not base64_data:
+            return False
+
+        mime_type = str(image.get("mimeType") or "image/png")
+        signature = cls._build_outbound_image_signature(chat_id, mime_type, base64_data)
+        now = time.monotonic()
+
+        async with cls._outbound_image_dedup_lock:
+            stale_keys = [
+                key
+                for key, ts in cls._recent_outbound_image_signatures.items()
+                if now - ts > OUTBOUND_IMAGE_DEDUP_WINDOW_SECONDS
+            ]
+            for key in stale_keys:
+                cls._recent_outbound_image_signatures.pop(key, None)
+
+            if signature in cls._recent_outbound_image_signatures:
+                logger.info(
+                    f"{SEND_LOG_PREFIX} skip duplicate outbound image "
+                    f"chat={chat_id} dedup_window={OUTBOUND_IMAGE_DEDUP_WINDOW_SECONDS:.1f}s"
+                )
+                return True
+
+            cls._recent_outbound_image_signatures[signature] = now
+            return False
+
+    @classmethod
     async def send_message_chain(
         cls,
         client: WeChatClient,
@@ -478,7 +531,16 @@ class AgentWeChatMessageEvent(AstrMessageEvent):
         if not payloads:
             return
 
-        for idx, payload in enumerate(payloads):
+        filtered_payloads: list[dict[str, Any]] = []
+        for payload in payloads:
+            if await cls._should_skip_duplicate_image_payload(chat_id, payload):
+                continue
+            filtered_payloads.append(payload)
+
+        if not filtered_payloads:
+            return
+
+        for idx, payload in enumerate(filtered_payloads):
             recovered = False
             for attempt in range(1, SEND_RECOVERY_RETRY_ATTEMPTS + 1):
                 try:
@@ -490,7 +552,7 @@ class AgentWeChatMessageEvent(AstrMessageEvent):
                 except requests.exceptions.ReadTimeout as exc:
                     logger.exception(
                         f"{SEND_LOG_PREFIX} send payload timeout "
-                        f"chat={chat_id} idx={idx + 1}/{len(payloads)}"
+                        f"chat={chat_id} idx={idx + 1}/{len(filtered_payloads)}"
                     )
                     raise RuntimeError(
                         "agent-wechat 发送超时（30秒未响应），"
@@ -499,7 +561,7 @@ class AgentWeChatMessageEvent(AstrMessageEvent):
                 except requests.exceptions.RequestException as exc:
                     logger.exception(
                         f"{SEND_LOG_PREFIX} send payload request error "
-                        f"chat={chat_id} idx={idx + 1}/{len(payloads)}"
+                        f"chat={chat_id} idx={idx + 1}/{len(filtered_payloads)}"
                     )
                     raise RuntimeError(f"agent-wechat 发送请求失败: {exc}") from exc
 
@@ -512,7 +574,7 @@ class AgentWeChatMessageEvent(AstrMessageEvent):
                 if recoverable and attempt < SEND_RECOVERY_RETRY_ATTEMPTS:
                     logger.warning(
                         f"{SEND_LOG_PREFIX} recoverable send error "
-                        f"chat={chat_id} idx={idx + 1}/{len(payloads)} "
+                        f"chat={chat_id} idx={idx + 1}/{len(filtered_payloads)} "
                         f"attempt={attempt}/{SEND_RECOVERY_RETRY_ATTEMPTS} "
                         f"error={error}; trying open_chat and retry"
                     )
@@ -521,14 +583,14 @@ class AgentWeChatMessageEvent(AstrMessageEvent):
                     except Exception as exc:
                         logger.warning(
                             f"{SEND_LOG_PREFIX} open_chat before retry failed "
-                            f"chat={chat_id} idx={idx + 1}/{len(payloads)} error={exc}"
+                            f"chat={chat_id} idx={idx + 1}/{len(filtered_payloads)} error={exc}"
                         )
                     await asyncio.sleep(SEND_RECOVERY_RETRY_INTERVAL_SECONDS)
                     continue
 
                 logger.error(
                     f"{SEND_LOG_PREFIX} send payload failed "
-                    f"chat={chat_id} idx={idx + 1}/{len(payloads)} "
+                    f"chat={chat_id} idx={idx + 1}/{len(filtered_payloads)} "
                     f"error={error}"
                 )
                 raise RuntimeError(error or "agent-wechat 发送失败")
