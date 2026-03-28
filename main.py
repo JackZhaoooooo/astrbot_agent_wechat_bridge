@@ -45,6 +45,10 @@ class AgentWeChatBridgePlugin(Star):
         super().__init__(context)
         self.config = config or AstrBotConfig()
         AgentWeChatPlatformAdapter.set_logout_notifier(self._notify_logout)
+        AgentWeChatPlatformAdapter.set_logout_notify_policy(
+            interval_seconds=self._get_logout_notify_interval_seconds(),
+            max_count=self._get_logout_notify_max_count(),
+        )
 
     def _get_logout_notify_umos(self) -> list[str]:
         raw = self.config.get("logout_notify_umos", [])
@@ -58,6 +62,22 @@ class AgentWeChatBridgePlugin(Star):
             if value:
                 umos.append(value)
         return umos
+
+    def _get_logout_notify_max_count(self) -> int:
+        raw = self.config.get("logout_notify_max_count", 0)
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            return 0
+        return max(0, value)
+
+    def _get_logout_notify_interval_seconds(self) -> float:
+        raw = self.config.get("logout_notify_interval_seconds", 60)
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            return 60.0
+        return max(1.0, value)
 
     async def _broadcast_chain(self, chain: MessageChain) -> int:
         umos = self._get_logout_notify_umos()
@@ -78,6 +98,10 @@ class AgentWeChatBridgePlugin(Star):
 
     async def _notify_logout(self, warn_text: str) -> None:
         _ = warn_text
+        AgentWeChatPlatformAdapter.set_logout_notify_policy(
+            interval_seconds=self._get_logout_notify_interval_seconds(),
+            max_count=self._get_logout_notify_max_count(),
+        )
         chain = MessageChain().message(
             "[agent-wechat]微信好像退出登录了呢，输入/wxauth登录吧"
         )

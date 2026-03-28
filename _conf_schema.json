@@ -4,5 +4,16 @@
     "description": "退出登录提醒",
     "hint": "UMO列表，/sid获取，列表组件（配置后向UMO列表发消息）",
     "default": []
+  },
+  "logout_notify_max_count": {
+    "type": "int",
+    "description": "退出登录消息最大发送数量",
+    "default": 0
+  },
+  "logout_notify_interval_seconds": {
+    "type": "float",
+    "description": "发送间隔时间",
+    "hint": "单位秒",
+    "default": 60
   }
 }

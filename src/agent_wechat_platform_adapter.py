@@ -126,6 +126,10 @@ class AgentWeChatPlatformAdapter(Platform):
     """以事件流为主触发，接口补偿兜底。"""
 
     _logout_notifier: Callable[[str], Awaitable[None] | None] | None = None
+    _logout_warn_interval_seconds: float = LOGIN_PAGE_WARN_INTERVAL_SECONDS
+    _logout_warn_max_count: int = 0
+    _logout_warn_sent_count: int = 0
+    _logout_warn_limit_logged: bool = False
 
     @classmethod
     def set_logout_notifier(
@@ -133,6 +137,16 @@ class AgentWeChatPlatformAdapter(Platform):
         notifier: Callable[[str], Awaitable[None] | None] | None,
     ) -> None:
         cls._logout_notifier = notifier
+
+    @classmethod
+    def set_logout_notify_policy(cls, *, interval_seconds: float, max_count: int) -> None:
+        cls._logout_warn_interval_seconds = max(1.0, float(interval_seconds))
+        cls._logout_warn_max_count = max(0, int(max_count))
+
+    @classmethod
+    def reset_logout_warning_state(cls) -> None:
+        cls._logout_warn_sent_count = 0
+        cls._logout_warn_limit_logged = False
 
     def __init__(
         self,
@@ -238,12 +252,26 @@ class AgentWeChatPlatformAdapter(Platform):
 
     def _warn_login_page_throttled(self) -> None:
         now = time.monotonic()
-        if now - self.last_login_page_warn_at < LOGIN_PAGE_WARN_INTERVAL_SECONDS:
+        interval_seconds = self.__class__._logout_warn_interval_seconds
+        if now - self.last_login_page_warn_at < interval_seconds:
             return
+
+        max_count = self.__class__._logout_warn_max_count
+        if max_count > 0 and self.__class__._logout_warn_sent_count >= max_count:
+            if not self.__class__._logout_warn_limit_logged:
+                logger.warning(
+                    "[agent_wechat] 退出登录提醒已达到最大发送数量，"
+                    f"max_count={max_count}，等待重新登录后重置"
+                )
+                self.__class__._logout_warn_limit_logged = True
+            return
+
         self.last_login_page_warn_at = now
+        self.__class__._logout_warn_sent_count += 1
+
         warn_text = (
             "微信疑似已掉回登录页（auth=logged_out），"
-            "请打开 noVNC 完成重新登录；该提示每60秒提醒一次"
+            "请打开 noVNC 完成重新登录"
         )
         logger.warning(f"[agent_wechat] {warn_text}")
 
@@ -602,6 +630,7 @@ class AgentWeChatPlatformAdapter(Platform):
             return False
 
         if prev_status != "logged_in":
+            self.__class__.reset_logout_warning_state()
             await self._rebaseline_after_relogin()
 
         self.last_login_page_warn_at = 0.0
