@@ -14,6 +14,6 @@
     "type": "float",
     "description": "发送间隔时间",
     "hint": "单位秒",
-    "default": 60
+    "default": 900
   }
 }
