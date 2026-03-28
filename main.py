@@ -140,13 +140,22 @@ class AgentWeChatBridgePlugin(Star):
     async def _render_terminal_capture_image(self, output: str) -> str | None:
         escaped = html.escape(output)
         template = """
-        <div style=\"padding:20px;background:#111827;color:#e5e7eb;font-family:Consolas,Monaco,monospace;\">
-          <div style=\"font-size:14px;margin-bottom:10px;color:#93c5fd;\">wx auth login terminal capture</div>
-          <pre style=\"white-space:pre-wrap;word-break:break-word;line-height:1.25;font-size:12px;\">{{ text }}</pre>
+        <div style=\"display:inline-block;padding:12px 14px;background:#0b1220;color:#e5e7eb;font-family:Consolas,Monaco,monospace;border-radius:8px;\">
+          <div style=\"font-size:16px;font-weight:600;margin-bottom:8px;color:#93c5fd;\">wx auth login terminal capture</div>
+          <pre style=\"margin:0;white-space:pre-wrap;word-break:break-word;line-height:1.35;font-size:15px;\">{{ text }}</pre>
         </div>
         """
+        options = {
+            "full_page": False,
+            "omit_background": False,
+        }
         try:
-            return await self.html_render(template, {"text": escaped}, return_url=True)
+            return await self.html_render(
+                template,
+                {"text": escaped},
+                return_url=True,
+                options=options,
+            )
         except Exception as exc:
             logger.warning(f"[agent_wechat] 终端截图渲染失败: {exc}")
             return None

@@ -1,22 +1,22 @@
-name: "astrbot_agent_wechat_bridge"
-author: "Codex"
-display_name: "Agent WeChat Bridge"
-desc: "AstrBot platform adapter that connects to personal WeChat through agent-wechat."
-version: "0.3.19"
-license: "AGPL-3.0"
-repo: "https://github.com/thisnick/agent-wechat"
-homepage: "https://github.com/thisnick/agent-wechat"
-astrbot_version: ">=4.16,<5"
+name: 'astrbot_agent_wechat_bridge'
+author: 'Codex'
+display_name: '微信代理助手'
+desc: '连实现微信个人号连接astrbot'
+version: '0.3.19'
+license: 'AGPL-3.0'
+repo: 'https://github.com/JackZhaoooooo/astrbot_agent_wechat_bridge'
+homepage: 'https://github.com/JackZhaoooooo/astrbot_agent_wechat_bridge'
+astrbot_version: '>=4.16,<5'
 tags:
-  - "astrbot"
-  - "wechat"
-  - "agent-wechat"
-  - "platform-adapter"
+  - 'astrbot'
+  - 'wechat'
+  - 'agent-wechat'
+  - 'platform-adapter'
 features:
-  - "Poll unread chats from agent-wechat"
-  - "Receive direct and group messages"
-  - "Reply with text, images, files, and audio attachments"
-  - "Optional allowlists for DM and group senders"
+  - 'Poll unread chats from agent-wechat'
+  - 'Receive direct and group messages'
+  - 'Reply with text, images, files, and audio attachments'
+  - 'Optional allowlists for DM and group senders'
 keywords:
   - astrbot
   - wechat
